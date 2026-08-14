@@ -1,0 +1,110 @@
+/* ====== 全局 CSS 变量与基础样式 ====== */
+
+:root {
+  /* 主题色 */
+  --app-primary: #409eff;
+  --app-success: #67c23a;
+  --app-warning: #e6a23c;
+  --app-danger: #f56c6c;
+  --app-info: #909399;
+
+  /* 侧边栏 */
+  --sidebar-bg-start: #1e2a4a;
+  --sidebar-bg-end: #0f1729;
+  --sidebar-width: 220px;
+  --sidebar-text: rgba(255, 255, 255, 0.75);
+  --sidebar-text-active: #ffffff;
+  --sidebar-accent: #4f8cff;
+
+  /* 内容区 */
+  --content-bg: #f5f7fa;
+  --card-bg: #ffffff;
+  --card-radius: 8px;
+  --card-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.06);
+  --card-shadow-hover: 0 6px 20px 0 rgba(0, 0, 0, 0.1);
+
+  /* 文字 */
+  --text-primary: #303133;
+  --text-regular: #606266;
+  --text-secondary: #909399;
+  --text-placeholder: #c0c4cc;
+  --border-color: #e4e7ed;
+  --border-color-light: #ebeef5;
+
+  /* 动效 */
+  --transition-base: 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Element Plus 变量覆盖 */
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  color: var(--text-primary);
+  background-color: var(--content-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ====== 全局滚动条美化 ====== */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(144, 147, 153, 0.3) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(144, 147, 153, 0.3);
+  border-radius: 4px;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(144, 147, 153, 0.6);
+  width: 8px;
+}
+
+/* ====== 通用过渡 ====== */
+.el-button,
+.el-card,
+.el-input__wrapper,
+.el-tag,
+.el-menu-item {
+  transition: all var(--transition-base) !important;
+}
+
+/* ====== 卡片圆角统一 ====== */
+.el-card {
+  border-radius: var(--card-radius) !important;
+  border: none !important;
+  box-shadow: var(--card-shadow) !important;
+}
+
+.el-card.is-hover-shadow:hover,
+.el-card.is-always-shadow {
+  box-shadow: var(--card-shadow-hover) !important;
+}
+
+/* ====== 对话框圆角 ====== */
+.el-dialog {
+  border-radius: 12px !important;
+  overflow: hidden;
+}
