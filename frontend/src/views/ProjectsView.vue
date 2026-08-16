@@ -23,49 +23,26 @@
       </el-empty>
     </div>
 
-    <div v-else class="project-grid">
-      <div
-        v-for="p in projects"
-        :key="p.id"
-        class="project-card"
-        @click="enterProject(p)"
-      >
-        <div class="project-cover" :class="'cover-' + p.status">
-          <el-icon :size="34"><Notebook /></el-icon>
-          <span class="cover-status">{{ statusLabel(p.status) }}</span>
-        </div>
-        <div class="project-body">
-          <h3 class="project-name">{{ p.name }}</h3>
-          <p class="project-idea" :title="p.idea">{{ p.idea || '（暂无核心梗）' }}</p>
-          <div class="project-meta">
+    <div v-else class="unified-list project-list">
+      <div v-for="p in projects" :key="p.id" class="list-row" @click="enterProject(p)">
+        <div class="proj-dot" :class="'dot-' + p.status"></div>
+        <div class="proj-main">
+          <div class="proj-name-row">
+            <span class="proj-name">{{ p.name }}</span>
             <el-tag size="small" :type="statusTag(p.status)">{{ statusLabel(p.status) }}</el-tag>
+          </div>
+          <div class="proj-idea">{{ p.idea || '（暂无核心梗）' }}</div>
+          <div class="proj-meta">
             <span v-if="p.genre" class="meta-item">{{ p.genre }}</span>
             <span v-if="p.target_words" class="meta-item">{{ formatWords(p.target_words) }}</span>
             <span v-if="p.platform" class="meta-item">{{ platformLabel(p.platform) }}</span>
+            <span class="meta-item">更新于 {{ shortTime(p.updated_at) }}</span>
           </div>
         </div>
-        <div class="project-footer">
-          <span class="update-time">更新于 {{ shortTime(p.updated_at) }}</span>
-          <span class="footer-actions">
-            <el-button
-              class="delete-btn"
-              link
-              type="danger"
-              size="small"
-              @click.stop="handleDelete(p)"
-            >
-              <el-icon><Delete /></el-icon>
-            </el-button>
-            <span class="enter-hint">
-              进入
-              <el-icon size="14"><ArrowRight /></el-icon>
-            </span>
-          </span>
-        </div>
+        <RowActions class="row-actions" :items="rowActions()" @command="(cmd: string) => onRowCommand(cmd, p)" />
       </div>
     </div>
-
-    <!-- 新建项目对话框 -->
+        <!-- 新建项目对话框 -->
     <el-dialog v-model="createVisible" title="新建小说项目" width="520px" :close-on-click-modal="false">
       <el-form :model="createForm" label-width="90px">
         <el-form-item label="书名" required>
@@ -109,6 +86,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { createProject, deleteProject, getProjects, type Project } from '@/api'
+import RowActions, { type RowActionItem } from '@/components/RowActions.vue'
 
 const router = useRouter()
 const projects = ref<Project[]>([])
@@ -126,10 +104,13 @@ const createForm = reactive({
 const genreOptions = ['玄幻', '都市', '科幻', '历史', '系统流', '重生', '穿越', '末世', '游戏', '灵异', '军事', '其他']
 
 const STATUS_LABELS: Record<string, string> = {
-  ideation: '创意中',
-  setting: '设定中',
-  writing: '写作中',
-  reviewing: '审阅中',
+  ideation: '创意孵化',
+  worldview: '世界观',
+  characters: '人物',
+  outline: '章纲',
+  writing: '正文',
+  review: '审阅',
+  foreshadow: '伏笔管理',
 }
 
 function statusLabel(status: string): string {
@@ -210,7 +191,7 @@ async function submitCreate() {
     ElMessage.success(`项目「${data.name}」已创建`)
     createVisible.value = false
     // 直接进入 IDEATION
-    router.push({ path: `/projects/${data.id}/ideation` })
+    router.push({ path: `/projects/${data.id}/workbench`, query: { name: data.name } })
   } catch (e: any) {
     ElMessage.error(`创建失败: ${e?.response?.data?.detail || e?.message || e}`)
   } finally {
@@ -219,7 +200,19 @@ async function submitCreate() {
 }
 
 function enterProject(p: Project) {
-  router.push({ path: `/projects/${p.id}/ideation` })
+  router.push({ path: `/projects/${p.id}/workbench`, query: { name: p.name } })
+}
+
+function rowActions(): RowActionItem[] {
+  return [
+    { command: 'enter', label: '进入工作台', icon: 'Right' },
+    { command: 'delete', label: '删除项目', icon: 'Delete', type: 'danger', divided: true },
+  ]
+}
+
+function onRowCommand(cmd: string, p: Project) {
+  if (cmd === 'enter') enterProject(p)
+  else if (cmd === 'delete') handleDelete(p)
 }
 
 async function handleDelete(p: Project) {
@@ -270,127 +263,40 @@ onMounted(loadProjects)
   font-size: 14px;
 }
 
-.project-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
+.project-list {
+  max-width: 860px;
+  margin: 0 auto;
 }
-
-.project-card {
-  background: var(--card-bg);
-  border-radius: 12px;
-  overflow: hidden;
-  cursor: pointer;
-  border: 1px solid var(--border-color-light);
-  box-shadow: var(--card-shadow);
-  transition: all var(--transition-base);
-  display: flex;
-  flex-direction: column;
+.proj-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 4px rgba(79, 140, 255, 0.08);
 }
-
-.project-card:hover {
-  transform: translateY(-4px);
-  box-shadow: var(--card-shadow-hover);
-  border-color: rgba(79, 140, 255, 0.4);
-}
-
-.project-cover {
-  height: 110px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  position: relative;
-  gap: 10px;
-}
-
-.cover-ideation { background: linear-gradient(135deg, #4f8cff 0%, #6f5cff 100%); }
-.cover-setting { background: linear-gradient(135deg, #36d1dc 0%, #5b86e5 100%); }
-.cover-writing { background: linear-gradient(135deg, #f7971e 0%, #ffd200 100%); }
-.cover-reviewing { background: linear-gradient(135deg, #c86dd7 0%, #ff6ec4 100%); }
-
-.cover-status {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 1px;
-}
-
-.project-body {
-  padding: 16px 18px;
-  flex: 1;
-}
-
-.project-name {
-  margin: 0 0 8px;
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.project-idea {
-  margin: 0 0 12px;
+.dot-ideation { background: #4f8cff; }
+.dot-worldview { background: #36d1dc; }
+.dot-characters { background: #00b578; }
+.dot-outline { background: #ff9f43; }
+.dot-writing { background: #f7971e; }
+.dot-review { background: #f5222d; }
+.dot-foreshadow { background: #722ed1; }
+.proj-main { flex: 1; min-width: 0; }
+.proj-name-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.proj-name { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.proj-idea {
   font-size: 13px;
   color: var(--text-secondary);
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
   overflow: hidden;
-  min-height: 39px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 520px;
 }
-
-.project-meta {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.meta-item {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.project-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 18px;
-  border-top: 1px solid var(--border-color-light);
-  background: #fafbfc;
-}
-
-.update-time {
-  font-size: 12px;
-  color: var(--text-placeholder);
-}
-
-.enter-hint {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  font-size: 13px;
-  color: var(--app-primary);
-  font-weight: 500;
-}
-
-.footer-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.delete-btn {
-  padding: 4px;
-  color: var(--text-placeholder) !important;
-}
-
-.delete-btn:hover {
-  color: var(--app-danger) !important;
-  background: rgba(245, 108, 108, 0.08);
-}
+.proj-meta { display: flex; gap: 12px; margin-top: 4px; font-size: 12px; color: var(--text-placeholder); }
 
 .empty-wrap {
   padding: 60px 0;
 }
 </style>
+
+

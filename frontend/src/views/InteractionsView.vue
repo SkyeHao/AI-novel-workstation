@@ -104,26 +104,11 @@
                     会话 {{ shortId(g.sessionId) }}
                   </el-tag>
                   <span class="group-time">{{ formatTime(g.timestamp) }}</span>
-                  <el-popconfirm
-                    title="删除该会话下的全部交互记录？"
-                    confirm-button-text="删除会话"
-                    cancel-button-text="取消"
-                    confirm-button-type="danger"
-                    @confirm="handleDeleteSession(g)"
-                  >
-                    <template #reference>
-                      <el-button
-                        type="danger"
-                        plain
-                        size="small"
-                        class="delete-session-btn"
-                        @click.stop
-                      >
-                        <el-icon><Delete /></el-icon>
-                        删除会话
-                      </el-button>
-                    </template>
-                  </el-popconfirm>
+                  <RowActions
+                    class="row-actions"
+                    :items="sessionActions()"
+                    @command="(cmd: string) => onSessionCommand(cmd, g)"
+                  />
                 </div>
               </template>
 
@@ -168,29 +153,10 @@
                     </div>
                   </div>
                   <div class="card-actions" @click.stop>
-                    <el-button
-                      type="primary"
-                      plain
-                      size="small"
-                      @click="handleViewDetail(row)"
-                    >
-                      <el-icon><View /></el-icon>
-                      详情
-                    </el-button>
-                    <el-popconfirm
-                      title="确定删除这条记录吗？"
-                      confirm-button-text="删除"
-                      cancel-button-text="取消"
-                      confirm-button-type="danger"
-                      @confirm="handleDelete(row)"
-                    >
-                      <template #reference>
-                        <el-button type="danger" plain size="small">
-                          <el-icon><Delete /></el-icon>
-                          删除
-                        </el-button>
-                      </template>
-                    </el-popconfirm>
+                    <RowActions
+                      :items="recordActions()"
+                      @command="(cmd: string) => onRecordCommand(cmd, row)"
+                    />
                   </div>
                 </div>
               </div>
@@ -400,7 +366,8 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import RowActions, { type RowActionItem } from '@/components/RowActions.vue'
 import {
   getInteractions,
   getInteractionDetail,
@@ -621,6 +588,53 @@ const handleDeleteSession = async (g: InteractionGroup) => {
     const msg = err instanceof Error ? err.message : '未知错误'
     ElMessage.error('删除会话记录失败: ' + msg)
   }
+}
+
+/** 会话三点菜单 */
+function sessionActions(): RowActionItem[] {
+  return [
+    { command: 'delete', label: '删除整个会话', icon: 'Delete', type: 'danger' },
+  ]
+}
+
+async function onSessionCommand(cmd: string, g: InteractionGroup) {
+  if (cmd !== 'delete') return
+  try {
+    await ElMessageBox.confirm(
+      '删除该会话下的全部交互记录？此操作不可恢复。',
+      '删除会话',
+      { type: 'warning', confirmButtonText: '删除会话', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  handleDeleteSession(g)
+}
+
+/** 记录行三点菜单 */
+function recordActions(): RowActionItem[] {
+  return [
+    { command: 'view', label: '查看详情', icon: 'View' },
+    { command: 'delete', label: '删除记录', icon: 'Delete', type: 'danger', divided: true },
+  ]
+}
+
+async function onRecordCommand(cmd: string, row: InteractionListItem) {
+  if (cmd === 'view') {
+    handleViewDetail(row)
+    return
+  }
+  if (cmd !== 'delete') return
+  try {
+    await ElMessageBox.confirm(
+      '确定删除这条记录吗？此操作不可恢复。',
+      '删除记录',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  handleDelete(row)
 }
 
 /** 从详情抽屉中删除 */
@@ -955,14 +969,9 @@ onMounted(() => {
 
 .card-actions {
   display: flex;
-  flex-direction: column;
+  align-items: center;
   gap: 6px;
   flex-shrink: 0;
-}
-
-.card-actions .el-button {
-  margin-left: 0;
-  min-width: 72px;
 }
 
 /* 标题单元格 */

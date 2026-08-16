@@ -1,130 +1,104 @@
-# AI 小说工作站
+﻿# AI 小说工作站
 
-工程化 AI 辅助长篇网络小说创作系统（20 万~500 万字量级）。
+工程化 AI 辅助长篇网络小说创作系统（20 万~500 万字量级）。基于 **Agent 中心化重构**（ADR-0005）与 **全栈 TypeScript 迁移**（ADR-0006）。
 
-> 📌 **文档**：产品定义见 [docs/蓝图.md](./docs/蓝图.md)，技术设计见 [docs/技术设计.md](./docs/技术设计.md)，术语见 [CONTEXT.md](./CONTEXT.md)，决策记录见 [docs/adr/](./docs/adr/)。
+> 📌 术语见 [CONTEXT.md](./CONTEXT.md)，决策记录见 [docs/adr/](./docs/adr/)，迁移计划见 [docs/迁移计划-全栈TS.md](./docs/迁移计划-全栈TS.md)，实现路线图见 [.scratch/agent-centric-redesign/](./.scratch/agent-centric-redesign/)。
+
+## 架构总览
+
+```
+frontend/            Vue3 + TS 前端（Vite / Element Plus）
+backend/             Fastify 5 + TS 后端（node: ESM，strict）
+└── src/
+    ├── config/      路径与全局配置（用户配置目录 .env）
+    ├── llm/         多模型客户端（OpenAI 协议兼容，按小说状态取模型 + 降级链）
+    ├── storage/     项目 / 设定 / 记忆 / 检索 / 交互记录（文件系统 + JSONL）
+    ├── tools/       工具面：file_read / file_write / web_search / ask_user
+    │                以及 T4 新增：read_current_state / list_states / switch_state / memory_search
+    ├── agent/       ReAct Agent（native / jsonfc / dsml / auto 四种工具调用模式）
+    │                ContextOrchestrator（T7）：系统提示 / 记忆召回 / 拼接 / token 压缩
+    ├── workflow/    创意孵化（IDEATION_SYSTEM_PROMPT+核心要素）、设定生成、正文四步、审阅五步
+    └── api/         Fastify 路由：projects / config / chat / workflow / files / interactions / agent
+```
+
+## T1–T10 落地情况
+
+| 主题 | 实现 |
+| --- | --- |
+| T1 状态机 | 7 个状态节点（创意孵化/世界观/人物/章纲/正文/审阅 + 横切伏笔管理），自由导航、单锚点 `current_state`、两级状态（小说级 + 工作单元 `work_unit`）、每书可扩展启用集 |
+| T2 状态组装 | 每状态 `context_assembly_ref`；前置不完备=软提示 + 硬拦截开关 |
+| T3 Agent 窗口 | 独立一等页面（`/projects/:id/agent`），主导航对话 + 状态面板；ask_user 升级为结构化选择卡片；单持续对话线（按书持久化 `memory/agent_chat.jsonl`），切状态由编排器重组 |
+| T4 工具面 | 新增 `read_current_state` / `list_states` / `switch_state` / `memory_search` |
+| T5 记忆 | `facts.jsonl`（append-only + supersedes）/ `characters.json` / `foreshadow.jsonl`（埋/收/兑现）/ `summaries/L1..L5.json`，条目标 `state`/`source`，摘要全自动驱动 |
+| T6 轻量 RAG | 不上向量库（ADR-0001）；规则关键词召回 + Agent 主动工具读取 + 分层摘要兜底（`MEMORY_RETRIEVAL_MODE=keyword|vector`） |
+| T7 编排器 | `ContextOrchestrator` 取代旧 ContextManager；`PromptAssembler` + `MemoryRetriever` + `TokenCompressor`（token 预算 / 裁剪 / 滑动窗口 / LLM 摘要压缩，联动 L2~L5） |
+| T8 前端 | Agent 独立页面 + 内容页独立存在（世界观/人物/章纲/正文/审阅/伏笔/工作台/设置），删旧视图 |
+| T9 正文/审阅 | 正文四步（前置检测→组装上下文→写章落盘→L1 摘要）；选段修改（原文/改写对比）；审阅五步（报告→去AI味建议→对比应用→REVIEWED）；章状态机 PENDING→GENERATED→REVIEWED |
+| T10 处置 | 删除 stage1 独立会话；创意孵化并入 Agent 窗口（保留核心要素 JSON + SSE/ask_user 机制）；移除 Python 代码库 |
 
 ## 快速开始
 
 ### 1. 安装依赖
 
 ```bash
-# 克隆项目后，创建虚拟环境
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
-# 安装项目（含开发依赖）
-pip install -e ".[dev]"
+cd backend && npm install
+cd ../frontend && npm install
 ```
 
-### 2. 配置环境变量
+### 2. 配置 LLM
+
+两种方式任选其一：
+
+- **前端模型池**：启动后访问 `/config`（用户设置），添加模型并按小说状态（创意孵化/世界观/人物/章纲/正文/审阅/伏笔管理）分配；
+- **环境变量**：编辑 `%APPDATA%\AI-Novel-Workstation\.env`（或仓库根 `.env`，首次运行自动迁移），填入：
+
+```
+LLM_TEXT_API_KEY=sk-xxx
+LLM_TEXT_BASE_URL=https://api.openai.com/v1
+LLM_TEXT_MODEL=gpt-4o
+```
+
+### 3. 启动
 
 ```bash
-cp .env.example .env
-# 编辑 .env，填入你的 API Key 和模型配置
+# 后端（开发，热重载）
+cd backend && npm run dev            # http://127.0.0.1:8000
+
+# 后端（生产）
+cd backend && npm run build && npm start
+
+# 前端
+cd frontend && npm run dev           # http://localhost:5173
 ```
 
-### 3. 使用 LLM Client
+> 后端产物默认路径 `data/`（app-state.json / interactions.jsonl），小说项目数据默认 `data/projects/`，可在「用户设置 → 项目目录」修改。
 
-```python
-import asyncio
-from ai_novel_workstation.llm import LLMClientManager, ChatMessage, Role
-from ai_novel_workstation.config.settings import LLMModelConfig
-
-# ---- 方式一：从 .env 配置自动初始化 ----
-manager = LLMClientManager.from_settings()
-
-# 按任务类型获取 client
-text_client = manager.get_client("text")       # 正文生成（大模型）
-check_client = manager.get_client("check")     # 校验审稿（小模型）
-
-# 同步调用
-response = text_client.chat([
-    ChatMessage(role=Role.SYSTEM, content="你是一个小说写作助手"),
-    ChatMessage(role=Role.USER, content="写一段打斗场景"),
-])
-print(response.content)
-print(f"Token 用量: {response.usage.total_tokens}")
-
-# 异步调用
-async def async_call():
-    response = await check_client.achat([
-        ChatMessage(role=Role.USER, content="检查这段文字是否有AI味"),
-    ])
-    print(response.content)
-
-asyncio.run(async_call())
-
-# 流式输出
-for chunk in text_client.stream([
-    ChatMessage(role=Role.USER, content="写一个开头"),
-]):
-    print(chunk, end="", flush=True)
-
-
-# ---- 方式二：手动创建单个 client ----
-from ai_novel_workstation.llm import LLMClient
-
-client = LLMClient(LLMModelConfig(
-    api_key="sk-xxx",
-    base_url="https://api.deepseek.com/v1",  # 兼容任意 OpenAI 协议 API
-    model="deepseek-chat",
-    temperature=0.8,
-))
-response = client.chat([ChatMessage(role=Role.USER, content="你好")])
-```
-
-### 4. 运行测试
+### 4. 测试与类型检查
 
 ```bash
-pytest tests/
+cd backend && npm test               # vitest（22 项核心行为测试）
+cd backend && npx tsc -p tsconfig.json
+cd frontend && npm run build         # vue-tsc + vite build
 ```
 
-## 项目结构
+## 主要流程
 
-```
-AI-novel-workstation/
-├── src/ai_novel_workstation/     # 源代码
-│   ├── agent/                    # ReAct Agent 与上下文管理
-│   ├── api/                      # FastAPI 路由（项目/设定/会话/交互记录）
-│   ├── config/                   # 配置与用户配置目录解析
-│   ├── llm/                      # LLM 客户端、多模型管理、交互记录
-│   ├── storage/                  # 存储层（项目/设定/交互记录/路径沙箱）
-│   ├── tools/                    # 工具系统（web_search/file/ask_user）
-│   └── workflow/                 # 工作流（IDEATION 会话、设定生成、prompt）
-├── frontend/                     # Vue3 前端
-├── tests/                        # 单元测试
-├── docs/                         # 蓝图、技术设计、ADR 决策记录
-├── data/                         # 运行数据（会话快照、交互记录库）
-├── scripts/                      # 启动脚本
-├── CONTEXT.md                    # 术语表
-├── pyproject.toml                # 项目配置
-├── .env.example                  # 环境变量模板
-└── .gitignore
-```
+1. **创意孵化**（Agent 窗口）：与 Agent 共创确认核心要素 → 写入 `核心要素.json` → 生成《故事愿景文档》。
+2. **设定生成**：世界观 / 人物卡片 / 章纲 / 风格，可一键「基于核心要素生成」（structure 模型）。
+3. **正文创作**：章纲就绪后，在「正文」页写章（writing 模型），自动产出 L1 摘要并登记正典事实。
+4. **审阅与去 AI 味**：审阅报告 → 结构化建议 → 逐条对比应用 → 标记 REVIEWED（check 模型）。
+5. **伏笔管理**：横切状态，台账驱动正文预注入。
 
-> 用户配置（`.env`）存于 `%APPDATA%\AI-Novel-Workstation\`，用户产物（小说项目）存于 `PROJECT_DIR`（默认 `%USERPROFILE%\Documents\AI-Novels`），均与代码分离。
+## 工具调用模式
 
-## 支持的 LLM 服务
+- `native`：OpenAI 原生 function calling；
+- `jsonfc`（默认）：强制 JSON 协议 `{"thought","tool_call","done"}`，适合不支持原生 FC 的模型；
+- `dsml`：DSML 文本标签格式；
+- `auto`：优先原生，回退 DSML。
 
-所有兼容 OpenAI Chat Completions API 协议的服务均可接入：
+## 目录速查
 
-| 服务 | base_url | 示例 model |
-|---|---|---|
-| OpenAI | `https://api.openai.com/v1` | gpt-4o, gpt-4o-mini |
-| DeepSeek | `https://api.deepseek.com/v1` | deepseek-chat |
-| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | qwen-max, qwen-plus |
-| Moonshot | `https://api.moonshot.cn/v1` | moonshot-v1-8k |
-| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | glm-4 |
-| 本地 Ollama | `http://localhost:11434/v1` | llama3, qwen2 |
-
-## LLM Client 核心特性
-
-- **OpenAI 协议兼容**：通过自定义 `base_url` 接入任意兼容服务
-- **同步 + 异步**：`chat()` / `achat()` / `stream()` / `astream()`
-- **流式输出**：逐 token 返回，支持 SSE
-- **自动重试**：tenacity 指数退避，默认 3 次
-- **Token 计数**：tiktoken 精确计数，支持预算管理
-- **多模型路由**：按任务类型（正文/结构/校验）分配不同模型
-- **降级策略**：大模型不可用时自动降级到小模型
-- **异常分层**：认证/限流/超时/响应解析等 6 类异常
+- 决策地图与票：`.scratch/agent-centric-redesign/`
+- 迁移任务票：`.scratch/ts-migration/issues/`
+- 蓝图 / 技术设计：`docs/蓝图.md`、`docs/技术设计.md`
+- 领域词汇：`CONTEXT.md`

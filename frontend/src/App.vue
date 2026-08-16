@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <el-container class="app-container">
     <el-aside :width="sidebarWidth" class="app-aside">
       <div class="logo">
@@ -20,116 +20,145 @@
       >
         <el-menu-item index="/projects">
           <el-icon><HomeFilled /></el-icon>
-          <span>工作台</span>
+          <span>作品库</span>
         </el-menu-item>
+
         <el-sub-menu v-if="currentProject.id" index="project">
           <template #title>
             <el-icon><Reading /></el-icon>
             <span>{{ currentProject.name || '当前项目' }}</span>
           </template>
-          <el-menu-item :index="`/projects/${currentProject.id}/ideation`">
-            <el-icon><ChatDotRound /></el-icon>
-            <span>创意共创</span>
+          <el-menu-item :index="`/projects/${currentProject.id}/workbench`">
+            <el-icon><Odometer /></el-icon>
+            <span>工作台</span>
           </el-menu-item>
-          <el-menu-item :index="`/projects/${currentProject.id}/settings`">
+          <el-menu-item :index="`/projects/${currentProject.id}/agent`" class="menu-agent">
+            <el-icon><ChatDotRound /></el-icon>
+            <span>Agent 窗口</span>
+          </el-menu-item>
+          <el-menu-item :index="`/projects/${currentProject.id}/worldview`">
+            <el-icon><Compass /></el-icon>
+            <span>世界观</span>
+          </el-menu-item>
+          <el-menu-item :index="`/projects/${currentProject.id}/characters`">
+            <el-icon><User /></el-icon>
+            <span>人物</span>
+          </el-menu-item>
+          <el-menu-item :index="`/projects/${currentProject.id}/outline`">
             <el-icon><Collection /></el-icon>
-            <span>设定中心</span>
+            <span>章纲</span>
           </el-menu-item>
           <el-menu-item :index="`/projects/${currentProject.id}/writing`">
             <el-icon><EditPen /></el-icon>
-            <span>正文生成</span>
-          </el-menu-item>
-          <el-menu-item :index="`/projects/${currentProject.id}/reading`">
-            <el-icon><Document /></el-icon>
-            <span>阅读</span>
+            <span>正文</span>
           </el-menu-item>
           <el-menu-item :index="`/projects/${currentProject.id}/review`">
             <el-icon><Finished /></el-icon>
-            <span>审阅 / 去AI味</span>
+            <span>审阅</span>
+          </el-menu-item>
+          <el-menu-item :index="`/projects/${currentProject.id}/foreshadow`">
+            <el-icon><Link /></el-icon>
+            <span>伏笔管理</span>
           </el-menu-item>
         </el-sub-menu>
-        <el-menu-item index="/interactions">
-          <el-icon><Files /></el-icon>
-          <span>交互记录</span>
-        </el-menu-item>
+
         <el-menu-item index="/config">
           <el-icon><Setting /></el-icon>
-          <span>设置</span>
+          <span>用户设置</span>
+        </el-menu-item>
+        <el-menu-item index="/interactions">
+          <el-icon><DataAnalysis /></el-icon>
+          <span>交互记录</span>
         </el-menu-item>
       </el-menu>
       <div class="sidebar-footer">
-        <span class="version">v0.1.0</span>
+        <span class="version">v0.2 · Agent 中心化重构</span>
       </div>
     </el-aside>
 
     <el-container class="main-container">
       <el-header class="app-header">
         <div class="header-left">
-          <el-icon class="header-icon" size="18"><Location /></el-icon>
-          <el-breadcrumb separator="/">
-            <el-breadcrumb-item :to="{ path: '/projects' }">工作台</el-breadcrumb-item>
-            <el-breadcrumb-item v-if="projectName">{{ projectName }}</el-breadcrumb-item>
-            <el-breadcrumb-item>{{ pageTitle }}</el-breadcrumb-item>
-          </el-breadcrumb>
+          <el-icon class="header-icon" :size="18"><Menu /></el-icon>
+          <span class="header-title">{{ pageTitle }}</span>
         </div>
         <div class="header-right">
-          <span class="header-title">{{ pageTitle }}</span>
+          <el-tag v-if="currentStateLabel" size="small" effect="light" round>
+            当前状态：{{ currentStateLabel }}
+          </el-tag>
         </div>
       </el-header>
       <el-main class="app-main">
-        <router-view v-slot="{ Component }">
-          <keep-alive :include="['IdeationView']">
-            <component :is="Component" />
-          </keep-alive>
-        </router-view>
+        <router-view />
       </el-main>
     </el-container>
   </el-container>
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { setCurrentProject, useCurrentProject } from '@/stores/currentProject'
+import { ElMessage } from 'element-plus'
+import { clearCurrentProject, setCurrentProject, useCurrentProject } from '@/stores/currentProject'
+import { getProjectStates } from '@/api'
 
 const route = useRoute()
 const currentProject = useCurrentProject()
+const currentStateLabel = ref('')
 
-// 进入项目路由时记录当前项目（侧边栏页签固定显示）
 watch(
   () => route.params.id,
   (id) => {
     if (id) {
       setCurrentProject(id as string, (route.query.name as string) || currentProject.name)
+      refreshStateLabel(id as string)
     }
   },
   { immediate: true }
 )
 
+async function refreshStateLabel(id: string): Promise<boolean> {
+  try {
+    const res = await getProjectStates(id)
+    currentStateLabel.value = res.data.current_label || ''
+    return true
+  } catch (err: any) {
+    currentStateLabel.value = ''
+    // 仅 404 表示项目已不存在；网络等异常不视为失效
+    return err?.response?.status !== 404
+  }
+}
+
 const activeMenu = computed(() => {
-  // 项目级路由：高亮子菜单中的当前项
   if (route.meta.projectScoped && route.params.id) {
     const base = `/projects/${route.params.id}`
-    if (route.name === 'ideation') return `${base}/ideation`
-    if (route.name === 'settings') return `${base}/settings`
-    if (route.name === 'writing') return `${base}/writing`
-    if (route.name === 'reading') return `${base}/reading`
-    if (route.name === 'review') return `${base}/review`
+    switch (route.name) {
+      case 'workbench': return `${base}/workbench`
+      case 'agent': return `${base}/agent`
+      case 'worldview': return `${base}/worldview`
+      case 'characters': return `${base}/characters`
+      case 'outline': return `${base}/outline`
+      case 'writing': return `${base}/writing`
+      case 'review': return `${base}/review`
+      case 'foreshadow': return `${base}/foreshadow`
+    }
   }
   return route.path
 })
 
-const projectName = computed(() => (route.query.name as string) || '')
-
-const pageTitle = computed(() => {
-  const t = (route.meta.title as string) || ''
-  if (route.name === 'reading' && route.params.chapterNo) {
-    return `阅读 · 第 ${route.params.chapterNo} 章`
-  }
-  return t
-})
+const pageTitle = computed(() => (route.meta.title as string) || '')
 
 const sidebarWidth = '220px'
+
+onMounted(async () => {
+  if (!currentProject.id) return
+  const ok = await refreshStateLabel(currentProject.id)
+  if (!ok) {
+    const staleName = currentProject.name || currentProject.id
+    clearCurrentProject()
+    ElMessage.warning(`项目「${staleName}」已不存在，已从侧边栏移除，请回到作品库重新选择`)
+  }
+})
 </script>
 
 <style>
@@ -137,7 +166,6 @@ const sidebarWidth = '220px'
   height: 100vh;
 }
 
-/* ====== 侧边栏 ====== */
 .app-aside {
   background: linear-gradient(180deg, var(--sidebar-bg-start) 0%, var(--sidebar-bg-end) 100%);
   backdrop-filter: blur(20px);
@@ -194,7 +222,6 @@ const sidebarWidth = '220px'
   white-space: nowrap;
 }
 
-/* ====== 菜单 ====== */
 .app-menu {
   border-right: none;
   padding: 12px 10px;
@@ -210,6 +237,10 @@ const sidebarWidth = '220px'
   border-radius: 8px;
   margin-bottom: 4px;
   color: rgba(255, 255, 255, 0.75) !important;
+}
+
+.app-menu .el-menu-item.menu-agent .el-icon {
+  color: #6f5cff;
 }
 
 .app-menu .el-menu-item:hover,
@@ -228,11 +259,6 @@ const sidebarWidth = '220px'
   padding-left: 42px !important;
 }
 
-.app-menu .el-menu-item .el-icon,
-.app-menu .el-sub-menu__title .el-icon {
-  color: inherit;
-}
-
 .sidebar-footer {
   padding: 14px 20px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
@@ -245,7 +271,6 @@ const sidebarWidth = '220px'
   letter-spacing: 0.3px;
 }
 
-/* ====== 主容器 ====== */
 .main-container {
   display: flex;
   flex-direction: column;

@@ -5,7 +5,7 @@
       <div class="header-content">
         <div class="header-title-group">
           <h2>模型池配置</h2>
-          <p>管理模型池并为三类任务分配模型：文本生成、结构化输出、检查校验</p>
+          <p>管理模型池，并按小说状态为各环节分配模型（Agent 在对应状态下的对话与生成使用该模型）</p>
         </div>
         <div class="header-actions">
           <el-button type="primary" plain :loading="loading" @click="loadAll">
@@ -21,249 +21,164 @@
     </el-card>
 
     <!-- 项目目录配置 -->
-    <el-card class="project-dir-card" shadow="never">
-      <template #header>
-        <div class="card-header-title">
-          <el-icon class="header-icon"><FolderOpened /></el-icon>
-          <span>项目目录配置</span>
-          <el-tag size="small" type="success" effect="plain" round>
-            {{ projectDir.exists ? '目录已就绪' : '目录待创建' }}
-          </el-tag>
+        <el-tabs v-model="configTab" class="config-tabs" type="border-card">
+      <el-tab-pane label="模型池" name="models">
+        <div class="tab-pane-head">
+          <span class="muted">模型池（{{ models.length }} 个模型），行末三点菜单可测试 / 编辑 / 删除</span>
         </div>
-      </template>
-      <div class="project-dir-body">
-        <div class="dir-input-row">
-          <el-input
-            v-model="projectDirInput"
-            placeholder="输入项目默认目录路径（如 projects 或 D:\MyNovels）"
-            clearable
-            class="dir-input"
-            @keyup.enter="handleSaveProjectDir"
-          >
-            <template #prefix>
-              <el-icon><Folder /></el-icon>
-            </template>
-          </el-input>
-          <el-button
-            type="primary"
-            :loading="savingProjectDir"
-            @click="handleSaveProjectDir"
-          >
-            <el-icon><Check /></el-icon>
-            <span>保存</span>
-          </el-button>
-          <el-button @click="handleResetProjectDir">
-            <el-icon><RefreshLeft /></el-icon>
-            <span>重置</span>
-          </el-button>
-        </div>
-        <div class="dir-info">
-          <el-icon class="dir-info-icon"><InfoFilled /></el-icon>
-          <span class="dir-info-text">
-            绝对路径：<code class="dir-path-code">{{ projectDir.absolute_path || '-' }}</code>
-          </span>
-          <span class="dir-info-hint">所有生成的项目内容将存储在此目录下</span>
-        </div>
-      </div>
-    </el-card>
-
-    <!-- 联网搜索配置 -->
-    <el-card class="search-config-card" shadow="never">
-      <template #header>
-        <div class="card-header-title">
-          <el-icon class="header-icon"><Search /></el-icon>
-          <span>联网搜索配置</span>
-          <el-tag size="small" type="info" effect="plain" round>
-            为搜索工具配置 API Key 与优先级
-          </el-tag>
-        </div>
-      </template>
-
-      <el-form label-position="top" class="search-config-form">
-        <div class="search-config-row">
-          <el-form-item label="Tavily API Key（https://tavily.com）">
-            <el-input
-              v-model="searchTavilyKey"
-              type="password"
-              show-password
-              :placeholder="searchConfig.tavily_configured
-                ? `已配置（${searchConfig.tavily_api_key}），留空保持不变`
-                : '输入 Tavily API Key，留空则不启用'"
-              clearable
-            />
-          </el-form-item>
-          <el-form-item label="Serper API Key（https://serper.dev）">
-            <el-input
-              v-model="searchSerperKey"
-              type="password"
-              show-password
-              :placeholder="searchConfig.serper_configured
-                ? `已配置（${searchConfig.serper_api_key}），留空保持不变`
-                : '输入 Serper API Key，留空则不启用'"
-              clearable
-            />
-          </el-form-item>
-        </div>
-        <div class="search-config-row">
-          <el-form-item label="搜索源优先级（逗号分隔）">
-            <el-input
-              v-model="searchProvidersInput"
-              placeholder="如 baidu,ddg,bing（留空使用默认顺序：baidu,ddg,tavily,serper,bing,cn_bing）"
-              clearable
-            />
-            <div class="search-providers-hint">
-              可选：ddg（ddgs库·Bing后端）、baidu、bing、cn_bing、tavily、serper。未配置 Key 的 API 源会自动跳过。
-            </div>
-          </el-form-item>
-        </div>
-        <div class="search-config-actions">
-          <el-button type="primary" :loading="savingSearch" @click="handleSaveSearchConfig">
-            <el-icon><Check /></el-icon>
-            <span>保存</span>
-          </el-button>
-        </div>
-      </el-form>
-    </el-card>
-
-    <!-- 区域一：模型池管理 -->
-    <el-card class="pool-card" shadow="never">
-      <template #header>
-        <div class="card-header-title">
-          <el-icon class="header-icon"><Box /></el-icon>
-          <span>模型池</span>
-          <el-tag size="small" type="info" effect="plain" round>
-            {{ models.length }} 个模型
-          </el-tag>
-        </div>
-      </template>
-
-      <el-table
-        v-loading="loading"
-        :data="models"
-        style="width: 100%"
-        empty-text="暂无模型，请点击「添加模型」按钮"
-      >
-        <el-table-column prop="name" label="名称" min-width="120" />
-        <el-table-column label="服务商" min-width="100">
+        <el-table
+                v-loading="loading"
+                :data="models"
+                style="width: 100%"
+                empty-text="暂无模型，请点击「添加模型」按钮"
+              >
+                <el-table-column prop="name" label="名称" min-width="120" />
+                <el-table-column label="服务商" min-width="100">
+                  <template #default="{ row }">
+                    {{ getProviderName(row.provider_id) }}
+                  </template>
+                </el-table-column>
+                <el-table-column prop="model" label="模型" min-width="140" />
+                <el-table-column label="Base URL" min-width="200" show-overflow-tooltip>
+                  <template #default="{ row }">
+                    <span class="mono">{{ row.base_url }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="100" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="getStatusType(row.status)" effect="light" size="small">
+                      {{ getStatusLabel(row.status) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="上次测试" width="160" align="center">
+                  <template #default="{ row }">
+                    {{ formatTime(row.last_tested) }}
+                  </template>
+                </el-table-column>
+                        <el-table-column label="操作" width="70" fixed="right" align="center">
           <template #default="{ row }">
-            {{ getProviderName(row.provider_id) }}
+            <RowActions :items="modelActions(row)" @command="(cmd: string) => onModelCommand(cmd, row)" />
           </template>
         </el-table-column>
-        <el-table-column prop="model" label="模型" min-width="140" />
-        <el-table-column label="Base URL" min-width="200" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="mono">{{ row.base_url }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="100" align="center">
-          <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)" effect="light" size="small">
-              {{ getStatusLabel(row.status) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="上次测试" width="160" align="center">
-          <template #default="{ row }">
-            {{ formatTime(row.last_tested) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
-          <template #default="{ row }">
-            <el-button
-              size="small"
-              :loading="!!testingMap[row.id]"
-              @click="handleTest(row)"
-            >
-              <el-icon v-if="!testingMap[row.id]"><Connection /></el-icon>
-              <span>测试</span>
-            </el-button>
-            <el-button size="small" type="primary" @click="openEditDialog(row)">
-              <el-icon><Edit /></el-icon>
-              <span>编辑</span>
-            </el-button>
-            <el-popconfirm
-              title="确定删除此模型吗？"
-              @confirm="handleDelete(row)"
-            >
-              <template #reference>
-                <el-button size="small" type="danger">
-                  <el-icon><Delete /></el-icon>
-                  <span>删除</span>
-                </el-button>
-              </template>
-            </el-popconfirm>
-          </template>
-        </el-table-column>
-      </el-table>
-    </el-card>
-
-    <!-- 区域二：任务分配 -->
-    <div class="section-title">
-      <el-icon class="section-icon"><SetUp /></el-icon>
-      <span>任务分配</span>
-    </div>
-
-    <div class="assignment-grid">
-      <el-card
-        v-for="task in taskTypes"
-        :key="task"
-        class="assignment-card"
-        :class="`task-${task}`"
-        shadow="hover"
-      >
-        <!-- 顶部彩色标识条 -->
-        <div class="card-stripe" :class="`stripe-${task}`"></div>
-
-        <!-- 卡片头部：任务名 -->
-        <div class="card-top">
-          <div class="task-info">
-            <div class="task-icon" :class="`icon-${task}`">
-              <el-icon size="18">
-                <Edit v-if="task === 'text'" />
-                <Document v-else-if="task === 'structure'" />
-                <CircleCheck v-else />
-              </el-icon>
-            </div>
-            <div class="task-meta">
-              <span class="task-name">{{ getTaskLabel(task) }}</span>
-              <span class="task-desc">{{ getTaskDesc(task) }}</span>
-            </div>
-          </div>
+              </el-table>
+      </el-tab-pane>
+      <el-tab-pane label="任务分配" name="assign">
+        <div class="tab-pane-head">
+          <span class="muted">按小说状态分配模型；未分配时回落 .env 任务配置或任意可用模型</span>
         </div>
-
-        <!-- 分配内容 -->
-        <div class="assignment-body">
-          <p class="assignment-desc">{{ getTaskDescription(task) }}</p>
-
-          <template v-if="models.length === 0">
-            <el-alert
-              title="请先添加模型"
-              type="warning"
-              :closable="false"
-              show-icon
-            />
-          </template>
-          <template v-else>
-            <el-select
-              v-model="assignmentMap[task]"
-              placeholder="选择模型"
-              style="width: 100%"
-              @change="onAssignmentChange(task)"
-            >
-              <el-option label="未分配" value="" />
-              <el-option
-                v-for="m in models"
-                :key="m.id"
-                :label="m.name"
-                :value="m.id"
-              />
-            </el-select>
-          </template>
-        </div>
-      </el-card>
-    </div>
-
-    <!-- 添加/编辑对话框 -->
+            <el-table :data="stateSlots" size="small">
+              <el-table-column label="小说状态" min-width="110">
+                <template #default="{ row }">
+                  <span class="assign-state">{{ row.label }}</span>
+                  <span class="assign-key muted">{{ row.key }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="默认任务" width="110">
+                <template #default="{ row }"><el-tag size="small" effect="plain">{{ row.taskLabel }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="说明" min-width="200" show-overflow-tooltip>
+                <template #default="{ row }"><span class="muted">{{ row.desc }}</span></template>
+              </el-table-column>
+              <el-table-column label="分配模型" min-width="220">
+                <template #default="{ row }">
+                  <el-select
+                    v-model="assignmentMap[row.key]"
+                    placeholder="选择模型"
+                    style="width: 100%"
+                    size="small"
+                    @change="onAssignmentChange(row.key)"
+                  >
+                    <el-option label="未分配" value="" />
+                    <el-option v-for="m in models" :key="m.id" :label="m.name" :value="m.id" />
+                  </el-select>
+                </template>
+              </el-table-column>
+            </el-table>
+      </el-tab-pane>
+      <el-tab-pane label="项目目录" name="dir">
+        <div class="project-dir-body">
+                <div class="dir-input-row">
+                  <el-input
+                    v-model="projectDirInput"
+                    placeholder="输入项目默认目录路径（如 projects 或 D:\MyNovels）"
+                    clearable
+                    class="dir-input"
+                    @keyup.enter="handleSaveProjectDir"
+                  >
+                    <template #prefix>
+                      <el-icon><Folder /></el-icon>
+                    </template>
+                  </el-input>
+                  <el-button
+                    type="primary"
+                    :loading="savingProjectDir"
+                    @click="handleSaveProjectDir"
+                  >
+                    <el-icon><Check /></el-icon>
+                    <span>保存</span>
+                  </el-button>
+                  <el-button @click="handleResetProjectDir">
+                    <el-icon><RefreshLeft /></el-icon>
+                    <span>重置</span>
+                  </el-button>
+                </div>
+                <div class="dir-info">
+                  <el-icon class="dir-info-icon"><InfoFilled /></el-icon>
+                  <span class="dir-info-text">
+                    绝对路径：<code class="dir-path-code">{{ projectDir.absolute_path || '-' }}</code>
+                  </span>
+                  <span class="dir-info-hint">所有生成的项目内容将存储在此目录下</span>
+                </div>
+              </div>
+      </el-tab-pane>
+      <el-tab-pane label="联网搜索" name="search">
+        <el-form label-position="top" class="search-config-form">
+                <div class="search-config-row">
+                  <el-form-item label="Tavily API Key（https://tavily.com）">
+                    <el-input
+                      v-model="searchTavilyKey"
+                      type="password"
+                      show-password
+                      :placeholder="searchConfig.tavily_configured
+                        ? `已配置（${searchConfig.tavily_api_key}），留空保持不变`
+                        : '输入 Tavily API Key，留空则不启用'"
+                      clearable
+                    />
+                  </el-form-item>
+                  <el-form-item label="Serper API Key（https://serper.dev）">
+                    <el-input
+                      v-model="searchSerperKey"
+                      type="password"
+                      show-password
+                      :placeholder="searchConfig.serper_configured
+                        ? `已配置（${searchConfig.serper_api_key}），留空保持不变`
+                        : '输入 Serper API Key，留空则不启用'"
+                      clearable
+                    />
+                  </el-form-item>
+                </div>
+                <div class="search-config-row">
+                  <el-form-item label="搜索源优先级（逗号分隔）">
+                    <el-input
+                      v-model="searchProvidersInput"
+                      placeholder="如 baidu,ddg,bing（留空使用默认顺序：baidu,ddg,tavily,serper,bing,cn_bing）"
+                      clearable
+                    />
+                    <div class="search-providers-hint">
+                      可选：ddg（ddgs库·Bing后端）、baidu、bing、cn_bing、tavily、serper。未配置 Key 的 API 源会自动跳过。
+                    </div>
+                  </el-form-item>
+                </div>
+                <div class="search-config-actions">
+                  <el-button type="primary" :loading="savingSearch" @click="handleSaveSearchConfig">
+                    <el-icon><Check /></el-icon>
+                    <span>保存</span>
+                  </el-button>
+                </div>
+              </el-form>
+      </el-tab-pane>
+    </el-tabs>    <!-- 添加/编辑对话框 -->
     <el-dialog
       v-model="dialogVisible"
       width="640px"
@@ -462,13 +377,13 @@ import {
   getSearchConfig,
   updateSearchConfig,
   type ModelEntry,
-  type TaskType,
   type CreateModelRequest,
   type UpdateModelRequest,
   type ProviderInfo,
   type ProjectDirConfig,
   type SearchConfig,
 } from '@/api'
+import RowActions, { type RowActionItem } from '@/components/RowActions.vue'
 
 // ====== 状态 ======
 const loading = ref(false)
@@ -478,15 +393,27 @@ const providers = ref<ProviderInfo[]>([])
 // 每行测试连接的 loading 状态
 const testingMap = reactive<Record<string, boolean>>({})
 
-// 任务分配映射（空字符串表示未分配）
-const assignmentMap = reactive<Record<TaskType, string>>({
-  text: '',
-  structure: '',
-  check: '',
-})
+// 状态槽：按小说状态分配模型（空字符串表示未分配）
+interface StateSlot {
+  key: string
+  label: string
+  taskLabel: string
+  desc: string
+}
 
-// 任务类型列表
-const taskTypes: TaskType[] = ['text', 'structure', 'check']
+const stateSlots: StateSlot[] = [
+  { key: 'ideation', label: '创意孵化', taskLabel: '文本生成', desc: 'Agent 在创意孵化状态下对话与头脑风暴使用的模型' },
+  { key: 'worldview', label: '世界观', taskLabel: '结构化输出', desc: '世界观设定生成与 Agent 在该状态的对话模型' },
+  { key: 'characters', label: '人物', taskLabel: '结构化输出', desc: '人物卡生成与 Agent 在该状态的对话模型' },
+  { key: 'outline', label: '章纲', taskLabel: '结构化输出', desc: '章纲生成与 Agent 在该状态的对话模型' },
+  { key: 'writing', label: '正文', taskLabel: '文本生成', desc: '正文写作/改写与 Agent 在该状态的对话模型' },
+  { key: 'review', label: '审阅', taskLabel: '检查校验', desc: '章节审阅与 Agent 在该状态的对话模型' },
+  { key: 'foreshadow', label: '伏笔管理', taskLabel: '文本生成', desc: '伏笔管理状态下 Agent 的对话模型' },
+]
+
+const assignmentMap = reactive<Record<string, string>>(
+  Object.fromEntries(stateSlots.map((s) => [s.key, ''])) as Record<string, string>
+)
 
 // ====== 项目目录状态 ======
 const projectDir = ref<ProjectDirConfig>({
@@ -509,6 +436,20 @@ const searchTavilyKey = ref('')
 const searchSerperKey = ref('')
 const searchProvidersInput = ref('')
 const savingSearch = ref(false)
+const configTab = ref('models')
+
+// ====== 模型池行操作 ======
+const modelActions = (row: ModelEntry): RowActionItem[] => [
+  { command: 'test', label: testingMap[row.id] ? '测试中…' : '测试连接', icon: 'Connection', disabled: !!testingMap[row.id] },
+  { command: 'edit', label: '编辑', icon: 'Edit' },
+  { command: 'delete', label: '删除', icon: 'Delete', type: 'danger', divided: true },
+]
+
+const onModelCommand = (cmd: string, row: ModelEntry) => {
+  if (cmd === 'test') handleTest(row)
+  else if (cmd === 'edit') openEditDialog(row)
+  else if (cmd === 'delete') handleDelete(row)
+}
 
 // ====== 对话框状态 ======
 const dialogVisible = ref(false)
@@ -539,36 +480,6 @@ const currentProviderWebsite = computed(() => currentProvider.value?.website || 
 const currentProviderName = computed(() => currentProvider.value?.name || '')
 
 // ====== 工具函数 ======
-
-// 任务类型 → 中文标签
-const getTaskLabel = (task: TaskType): string => {
-  const map: Record<TaskType, string> = {
-    text: '文本生成',
-    structure: '结构化输出',
-    check: '检查校验',
-  }
-  return map[task]
-}
-
-// 任务类型 → 英文描述
-const getTaskDesc = (task: TaskType): string => {
-  const map: Record<TaskType, string> = {
-    text: 'Text Generation',
-    structure: 'Structured Output',
-    check: 'Validation Check',
-  }
-  return map[task]
-}
-
-// 任务类型 → 详细描述
-const getTaskDescription = (task: TaskType): string => {
-  const map: Record<TaskType, string> = {
-    text: '用于生成小说正文、章节内容等自然语言文本',
-    structure: '用于生成大纲、角色卡、章节卡等结构化数据',
-    check: '用于检查文本一致性、逻辑合理性等校验任务',
-  }
-  return map[task]
-}
 
 // 服务商 ID → 中文名
 const getProviderName = (providerId: string): string => {
@@ -641,7 +552,7 @@ const loadAssignments = async () => {
   try {
     const { data } = await getAssignments()
     for (const a of data) {
-      assignmentMap[a.task] = a.model_id || ''
+      assignmentMap[a.state] = a.model_id || ''
     }
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '未知错误'
@@ -889,13 +800,14 @@ const saveModel = async () => {
 
 // ====== 任务分配操作 ======
 
-// 任务分配变更
-const onAssignmentChange = async (task: TaskType) => {
-  const value = assignmentMap[task]
+// 按状态分配变更
+const onAssignmentChange = async (state: string) => {
+  const value = assignmentMap[state]
   const modelId = value || null
   try {
-    await updateAssignment(task, modelId)
-    ElMessage.success(`${getTaskLabel(task)} 分配已更新`)
+    await updateAssignment(state, modelId)
+    const slot = stateSlots.find((s) => s.key === state)
+    ElMessage.success(`${slot?.label || state} 分配已更新`)
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '未知错误'
     ElMessage.error('分配失败：' + msg)
@@ -1262,3 +1174,33 @@ onMounted(() => {
   word-break: break-all;
 }
 </style>
+
+/* ====== 按状态配色 ====== */
+.stripe-ideation { background: linear-gradient(90deg, #4f8cff 0%, #6f8cff 100%); }
+.stripe-worldview { background: linear-gradient(90deg, #36d1dc 0%, #5b86e5 100%); }
+.stripe-characters { background: linear-gradient(90deg, #00b578 0%, #67c23a 100%); }
+.stripe-outline { background: linear-gradient(90deg, #ff9f43 0%, #ffd200 100%); }
+.stripe-writing { background: linear-gradient(90deg, #eb5757 0%, #f7971e 100%); }
+.stripe-review { background: linear-gradient(90deg, #f5222d 0%, #c86dd7 100%); }
+.stripe-foreshadow { background: linear-gradient(90deg, #722ed1 0%, #6f5cff 100%); }
+
+.icon-ideation { background: linear-gradient(135deg, #4f8cff 0%, #6f5cff 100%); box-shadow: 0 4px 10px rgba(79, 140, 255, 0.3); }
+.icon-worldview { background: linear-gradient(135deg, #36d1dc 0%, #5b86e5 100%); box-shadow: 0 4px 10px rgba(54, 209, 220, 0.3); }
+.icon-characters { background: linear-gradient(135deg, #00b578 0%, #67c23a 100%); box-shadow: 0 4px 10px rgba(0, 181, 120, 0.3); }
+.icon-outline { background: linear-gradient(135deg, #ff9f43 0%, #ffd200 100%); box-shadow: 0 4px 10px rgba(255, 159, 67, 0.3); }
+.icon-writing { background: linear-gradient(135deg, #eb5757 0%, #f7971e 100%); box-shadow: 0 4px 10px rgba(235, 87, 87, 0.3); }
+.icon-review { background: linear-gradient(135deg, #f5222d 0%, #c86dd7 100%); box-shadow: 0 4px 10px rgba(245, 34, 45, 0.3); }
+.icon-foreshadow { background: linear-gradient(135deg, #722ed1 0%, #6f5cff 100%); box-shadow: 0 4px 10px rgba(114, 46, 209, 0.3); }
+
+.section-hint {
+  font-size: 12px;
+  color: var(--text-placeholder);
+  margin-left: 8px;
+  font-weight: 400;
+}
+
+.config-tabs { margin-top: 16px; }
+.tab-pane-head { margin-bottom: 12px; }
+.assign-state { font-weight: 600; margin-right: 6px; }
+.assign-key { font-size: 12px; }
+

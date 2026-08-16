@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -42,8 +42,10 @@ novel-projects/
 # 运行数据（会话快照、交互记录库）
 data/
 
-# 前端依赖
-frontend/node_modules/
-
+# 依赖\r\nnode_modules/\r\n
 # 诊断临时文件
 example.html
+
+# 依赖
+node_modules/
+

@@ -108,3 +108,99 @@ body,
   border-radius: 12px !important;
   overflow: hidden;
 }
+
+/* ====== 统一 UI 风格（分组折叠 / 三点菜单 / 列表） ====== */
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: var(--text-primary);
+}
+.page-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* 分组折叠面板：去除默认边框，改用卡片观感 */
+.el-collapse.group-collapse {
+  border: none;
+}
+.el-collapse.group-collapse .el-collapse-item {
+  margin-bottom: 12px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: var(--card-shadow);
+}
+.el-collapse.group-collapse .el-collapse-item__header {
+  border: none;
+  height: 48px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  background: linear-gradient(90deg, #fafbfd 0%, #ffffff 100%);
+}
+.el-collapse.group-collapse .el-collapse-item__header:hover {
+  background: #f7f9fc;
+}
+.el-collapse.group-collapse .el-collapse-item__wrap {
+  border: none;
+  background: #fff;
+}
+.el-collapse.group-collapse .el-collapse-item__content {
+  padding: 16px;
+  color: var(--text-regular);
+}
+.collapse-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.collapse-title .el-icon {
+  color: var(--app-primary);
+}
+.collapse-title .collapse-count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+/* 三点菜单按钮 */
+.row-actions {
+  display: flex;
+  align-items: center;
+}
+
+/* 通用列表行（非表格） */
+.unified-list .list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all var(--transition-base);
+  border: 1px solid transparent;
+}
+.unified-list .list-row:hover {
+  background: #f7f9fc;
+  border-color: var(--border-color-light);
+}
+.unified-list .list-row + .list-row {
+  margin-top: 8px;
+}
