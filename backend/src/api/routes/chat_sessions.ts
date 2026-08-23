@@ -11,11 +11,13 @@ import {
   type ChatMember,
 } from "../../workflow/chat_session.js";
 import { getAgentRole } from "../../assets/agent_roles.js";
-import { getClientForTask } from "../state.js";
+import { getClientForTask, getProjectStore } from "../state.js";
 import { InteractionLogger } from "../../llm/interaction_logger.js";
 import { saveInteraction } from "../../storage/interaction_store.js";
 import { TransformersEmbeddingService, type EmbeddingService } from "../../vector/embedding.js";
 import { QdrantVectorStore, type VectorStore } from "../../vector/store.js";
+import { FileChatStore } from "../../storage/chat_store.js";
+import type { ChatSessionSnapshot } from "../../workflow/chat_session.js";
 
 /** 内存中的群聊会话注册表（持久化与恢复见工单 07） */
 const _sessions = new Map<string, ChatSession>();
@@ -38,6 +40,23 @@ function getVectorBundle(): { embedding: EmbeddingService; store: VectorStore } 
     }
   }
   return _vectorBundle;
+}
+
+/** 讨论记录文件存储（工单 07）：懒加载单例，路径由当前项目目录解析。 */
+let _chatStore: FileChatStore | null = null;
+function getChatStore(): FileChatStore {
+  if (!_chatStore) _chatStore = new FileChatStore(getProjectStore());
+  return _chatStore;
+}
+
+/** 磁盘恢复：内存未命中时按会话 id 跨项目查找快照（刷新 / 重启后可续看）。 */
+function loadFromDisk(sessionId: string): ChatSessionSnapshot | null {
+  const store = getChatStore();
+  for (const project of getProjectStore().list()) {
+    const snapshot = store.load(project.id, sessionId);
+    if (snapshot) return snapshot;
+  }
+  return null;
 }
 
 function roleToMember(roleId: string): ChatMember {
@@ -106,6 +125,8 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
       staticContext: body.staticContext ?? {},
       llm: client,
       maxRounds: body.maxRounds ?? 1,
+      // 工单 07：讨论记录 / 共识 / 最终方案按书落盘
+      chatStore: getChatStore(),
       // 工单 06：注入本地 Embedding + Qdrant；不可用时降级，不阻断
       vector: getVectorBundle() ? { embedding: _vectorBundle!.embedding, store: _vectorBundle!.store } : undefined,
     });
@@ -119,11 +140,21 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
     return { sessionId, status: session.getStatus(), members, topic };
   });
 
+  // ---- 会话列表（按书；含共识 / 最终方案，恢复入口） ----
+  app.get<{ Querystring: { projectId?: string } }>("/", async (req, reply) => {
+    const projectId = String(req.query?.projectId ?? "");
+    if (!projectId) return reply.code(400).send({ error: "projectId 不能为空" });
+    return { sessions: getChatStore().list(projectId) };
+  });
+
   // ---- 会话详情（含完整记录；刷新 / 恢复用） ----
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
     const session = _sessions.get(req.params.id);
-    if (!session) return reply.code(404).send({ error: "讨论会话不存在" });
-    return session.getSnapshot();
+    if (session) return session.getSnapshot();
+    // 工单 07：内存未命中回退磁盘（重启后仍可查看历史）
+    const snapshot = loadFromDisk(req.params.id);
+    if (!snapshot) return reply.code(404).send({ error: "讨论会话不存在" });
+    return snapshot;
   });
 
   // ---- 作者发言 ----
@@ -153,7 +184,9 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
   // ---- SSE 实时事件流 ----
   app.get<{ Params: { id: string } }>("/:id/stream", async (req, reply) => {
     const session = _sessions.get(req.params.id);
-    if (!session) return reply.code(404).send({ error: "讨论会话不存在" });
+    // 工单 07：内存未命中时从磁盘恢复终态会话（历史回放后补发 done）
+    const snapshot = session ? undefined : loadFromDisk(req.params.id);
+    if (!session && !snapshot) return reply.code(404).send({ error: "讨论会话不存在" });
 
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -201,25 +234,32 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
     };
 
     // 断线重连 / 刷新时回放历史，前端按消息 id 去重
-    for (const m of session.getMessages()) {
+    const messages = session ? session.getMessages() : (snapshot?.messages ?? []);
+    const status = session ? session.getStatus() : (snapshot?.status ?? "terminated");
+    for (const m of messages) {
       send("chat_message", m);
     }
     send("system", {
-      message: `已连接会话，当前状态：${session.getStatus()}`,
-      status: session.getStatus(),
+      message: `已连接会话，当前状态：${status}`,
+      status,
     });
     // 已结束会话补发终态事件，让前端一次拉齐
-    if (session.getStatus() === "completed") {
-      send("done", { status: "completed" });
+    if (status === "completed") {
+      send("done", { status: "completed", summary: snapshot?.summary });
       close();
       return;
     }
-    if (session.getStatus() === "terminated") {
+    if (status === "terminated") {
       send("done", { status: "terminated" });
       close();
       return;
     }
 
+    if (!session) {
+      send("error", { error: "会话未在内存中运行，无法继续订阅" });
+      close();
+      return;
+    }
     unsubscribe = session.subscribe(emit);
   });
 }

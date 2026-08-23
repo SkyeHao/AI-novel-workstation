@@ -17,6 +17,7 @@ import { ContextAssembler, type ContextAssemblerOptions } from "./context_assemb
 import type { EmbeddingService } from "../vector/embedding.js";
 import type { VectorStore } from "../vector/store.js";
 import { VectorDiscussionContext } from "../vector/context.js";
+import type { ChatStore } from "../storage/chat_store.js";
 
 export type ChatSessionStatus = "idle" | "running" | "synthesizing" | "completed" | "terminated";
 
@@ -43,6 +44,28 @@ export interface ChatMessageRecord {
   timestamp: string;
   /** 回应的消息 id（工单 05 接入），让讨论脉络可溯 */
   replyTo?: string;
+}
+
+/** 共识节点（工单 07 持久化：成果单独落库，与过程记录分离）。 */
+export interface ChatConsensusNode {
+  level: number;
+  message: string;
+  signals?: string[];
+  timestamp: string;
+}
+
+/** 可序列化的会话快照（工单 07：供持久化 / 恢复 / 前端查看）。 */
+export interface ChatSessionSnapshot {
+  id: string;
+  projectId: string;
+  topic: string;
+  members: ChatMember[];
+  messages: ChatMessageRecord[];
+  status: ChatSessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  summary?: string;
+  consensusNodes: ChatConsensusNode[];
 }
 
 export type ChatSessionEvent =
@@ -84,6 +107,8 @@ export interface ChatSessionConfig {
     /** 向量就绪等待上限（ms），默认 4000；超时自动降级为关键词，不阻塞讨论。 */
     readyTimeoutMs?: number;
   };
+  /** 持久化存储（工单 07）：注入后会话记录 / 共识 / 最终方案按书落盘；缺省不持久化。 */
+  chatStore?: ChatStore;
   /** 共识检测配置（工单 04：阈值 / 连续轮数 / 收敛判定可注入；工单 06 注入向量聚类） */
   consensus?: ConsensusDetectorOptions;
   /** 上下文组装配置（工单 05：L1/L2 条数、token 预算等；测试注入小预算验证降级） */
@@ -124,6 +149,12 @@ export class ChatSession {
   private _vectorContext: VectorDiscussionContext | null;
   /** 向量就绪等待上限（ms），工单 06 */
   private _vectorReadyTimeoutMs: number;
+  /** 持久化存储（工单 07）：缺省为 null 不落盘 */
+  private _chatStore: ChatStore | null;
+  /** 共识节点（工单 07）：成果单独落库，与过程记录分离 */
+  private _consensusNodes: ChatConsensusNode[] = [];
+  /** 最终方案（合成者总结），工单 07 进入快照 / 落库 */
+  private _summary: string | undefined;
 
   constructor(config: ChatSessionConfig) {
     this.id = config.id ?? randomUUID();
@@ -144,6 +175,7 @@ export class ChatSession {
         })
       : null;
     this._vectorReadyTimeoutMs = config.vector?.readyTimeoutMs ?? 4000;
+    this._chatStore = config.chatStore ?? null;
     this._scheduler = new SpeakerScheduler(config.members, {
       cooldownMs: config.cooldownMs,
       now: config.now,
@@ -188,6 +220,8 @@ export class ChatSession {
       this._emit({ type: "system", data: { message: `成员「${m.name}」已加入群聊`, memberId: m.id } });
     }
 
+    // 工单 07：落盘初始记录（建文件），后续消息增量追加
+    this._chatStore?.save(this.getSnapshot());
     this._completion = this._prepareAndDrive().finally(() => {
       this._updatedAt = new Date().toISOString();
     });
@@ -210,6 +244,7 @@ export class ChatSession {
     };
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
+    this._chatStore?.appendMessage(this.projectId, this.id, record);
     this._scheduler.trackMessage(record.content);
     // 工单 06：作者发言进入向量上下文（供后续话题相关性 / 收敛聚类），失败静默
     if (this._vectorContext) {
@@ -249,6 +284,8 @@ export class ChatSession {
     this._status = "terminated";
     this._updatedAt = new Date().toISOString();
     this._abort?.abort();
+    this._chatStore?.setStatus(this.projectId, this.id, "terminated");
+    this._chatStore?.save(this.getSnapshot());
     this._emit({ type: "system", data: { message: "讨论已被作者终止", status: this._status } });
   }
 
@@ -274,6 +311,8 @@ export class ChatSession {
       status: this._status,
       createdAt: this.createdAt,
       updatedAt: this._updatedAt,
+      summary: this._summary,
+      consensusNodes: [...this._consensusNodes],
     };
   }
 
@@ -361,12 +400,16 @@ export class ChatSession {
       if (this._status === "running") {
         this._status = "completed";
         this._updatedAt = new Date().toISOString();
+        this._chatStore?.setStatus(this.projectId, this.id, "completed");
+        this._chatStore?.save(this.getSnapshot());
         this._emit({ type: "done", data: { status: "completed" } });
       }
     } catch (err) {
       // 异常统一收敛为 error 事件；状态进入 terminated（对应设计文档「作者手动终止 / 异常」）
       this._status = "terminated";
       this._updatedAt = new Date().toISOString();
+      this._chatStore?.setStatus(this.projectId, this.id, "terminated");
+      this._chatStore?.save(this.getSnapshot());
       const message = err instanceof Error ? err.message : String(err);
       // 手动终止触发的中止（abort）不算运行错误，不推送 error 事件
       if (!/abort|终止/i.test(message)) {
@@ -479,6 +522,7 @@ export class ChatSession {
     record.content = stripSelfRating(resp.content);
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
+    this._chatStore?.appendMessage(this.projectId, this.id, record);
     this._scheduler.trackMessage(record.content);
     this._emit({ type: "chat_message", data: record });
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "idle" } });
@@ -505,6 +549,14 @@ export class ChatSession {
       data: { message: "已达成共识，合成者「" + synthesizer.name + "」正在整理最终方案", status: this._status, memberId: synthesizer.id },
     });
     this._emit({ type: "consensus", data: { level: 1, message: "已达成共识，开始合成最终方案" } });
+    // 工单 07：共识节点单独落库（成果与过程记录分离）
+    const node: ChatConsensusNode = {
+      level: 1,
+      message: "已达成共识，开始合成最终方案",
+      timestamp: new Date().toISOString(),
+    };
+    this._consensusNodes.push(node);
+    this._chatStore?.appendConsensus(this.projectId, this.id, node);
     this._emit({ type: "agent_status", data: { memberId: synthesizer.id, status: "thinking" } });
 
     const recent = this._messages
@@ -527,6 +579,11 @@ export class ChatSession {
 
     this._status = "completed";
     this._updatedAt = new Date().toISOString();
+    // 工单 07：最终方案落库 + 终态写盘
+    this._summary = summary;
+    this._chatStore?.setSummary(this.projectId, this.id, summary);
+    this._chatStore?.setStatus(this.projectId, this.id, "completed");
+    this._chatStore?.save(this.getSnapshot());
     this._emit({ type: "agent_status", data: { memberId: synthesizer.id, status: "idle" } });
     this._emit({ type: "consensus", data: { level: 1, message: "合成者产出最终方案：\n" + summary } });
     this._emit({ type: "done", data: { status: "completed", summary } });
