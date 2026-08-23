@@ -73,8 +73,8 @@ function extractKeywords(member: ChatMember): string[] {
   return [...terms].slice(0, 60);
 }
 
-/** 默认关键词相关性：recentText 命中该角色关键词越多得分越高；无命中给随机下限。 */
-function keywordRelevance(member: ChatMember, recentText: string, random: () => number): number {
+/** 默认关键词相关性：recentText 命中该角色关键词越多得分越高；无命中给随机下限。工单 06 供向量上下文降级复用。 */
+export function keywordRelevance(member: ChatMember, recentText: string, random: () => number): number {
   const terms = extractKeywords(member);
   if (terms.length === 0) return Math.round(random() * 10);
   let hits = 0;

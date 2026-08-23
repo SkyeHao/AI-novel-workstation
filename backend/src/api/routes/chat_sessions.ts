@@ -14,9 +14,31 @@ import { getAgentRole } from "../../assets/agent_roles.js";
 import { getClientForTask } from "../state.js";
 import { InteractionLogger } from "../../llm/interaction_logger.js";
 import { saveInteraction } from "../../storage/interaction_store.js";
+import { TransformersEmbeddingService, type EmbeddingService } from "../../vector/embedding.js";
+import { QdrantVectorStore, type VectorStore } from "../../vector/store.js";
 
 /** 内存中的群聊会话注册表（持久化与恢复见工单 07） */
 const _sessions = new Map<string, ChatSession>();
+
+/**
+ * 向量服务懒加载单例（工单 06）：Qdrant / Embedding 模型不可用时由 ChatSession
+ * 自动降级为关键词 + 随机，不阻塞讨论主流程；服务层保留运行时切换接口。
+ */
+let _vectorBundle: { embedding: EmbeddingService; store: VectorStore } | null = null;
+
+function getVectorBundle(): { embedding: EmbeddingService; store: VectorStore } | null {
+  if (!_vectorBundle) {
+    try {
+      _vectorBundle = {
+        embedding: new TransformersEmbeddingService(),
+        store: new QdrantVectorStore(),
+      };
+    } catch {
+      _vectorBundle = null;
+    }
+  }
+  return _vectorBundle;
+}
 
 function roleToMember(roleId: string): ChatMember {
   const role = getAgentRole(roleId);
@@ -84,6 +106,8 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
       staticContext: body.staticContext ?? {},
       llm: client,
       maxRounds: body.maxRounds ?? 1,
+      // 工单 06：注入本地 Embedding + Qdrant；不可用时降级，不阻断
+      vector: getVectorBundle() ? { embedding: _vectorBundle!.embedding, store: _vectorBundle!.store } : undefined,
     });
     _sessions.set(sessionId, session);
     try {

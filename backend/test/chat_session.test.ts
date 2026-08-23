@@ -3,6 +3,43 @@ import { ChatSession } from "../src/workflow/chat_session.js";
 import type { ChatSessionEvent, ChatMember, ChatMessageRecord } from "../src/workflow/chat_session.js";
 import { SpeakerScheduler } from "../src/workflow/speaker_scheduler.js";
 import type { LLMClient } from "../src/llm/client.js";
+import type { EmbeddingService } from "../src/vector/embedding.js";
+import { clusterSimilarity, type VectorPoint, type VectorStore } from "../src/vector/store.js";
+
+class FakeEmbedding implements EmbeddingService {
+  modelName = "fake";
+  dimensions = 3;
+  ready = true;
+  route: (text: string) => number[];
+  constructor(route: (text: string) => number[]) {
+    this.route = route;
+  }
+  async ensureReady(): Promise<boolean> {
+    return this.ready;
+  }
+  async embed(texts: string[]): Promise<number[][]> {
+    return texts.map((t) => this.route(t));
+  }
+}
+
+class FakeVectorStore implements VectorStore {
+  name = "fake";
+  points: VectorPoint[] = [];
+  async ensureReady(): Promise<boolean> {
+    return true;
+  }
+  async ensureCollection(): Promise<void> {}
+  async upsert(points: VectorPoint[]): Promise<void> {
+    this.points.push(...points);
+  }
+  async search(): Promise<string[]> {
+    return [];
+  }
+  clusterSimilarity(vectors: number[][]): number {
+    return clusterSimilarity(vectors);
+  }
+  async close(): Promise<void> {}
+}
 
 class FakeLLMClient {
   config = { model: "fake", apiKey: "fake", baseUrl: "fake", temperature: 0, maxTokens: 100, timeout: 10, maxRetries: 0 };
@@ -766,5 +803,114 @@ describe("ChatSession（工单 05：分层上下文组装）", () => {
 
     const last = fake.calls[3]!.userPrompt;
     expect(last).toContain("近期脉络已压缩");
+  });
+});
+
+describe("ChatSession（工单 06：Embedding + 向量库）", () => {
+  it("话题相关性经向量嵌入真实影响意愿度：高相关成员连续优先发言（跑题拉回）", async () => {
+    // r1 画像关键词「危机」，r2 画像关键词「情感」。
+    // r1 的第一条发言含「情感」关键词（关键词降级会偏向 r2），
+    // 但向量贴近 r1 画像（向量相关性偏向 r1）→ 证明走的是向量而非关键词。
+    const route = (text: string): number[] => {
+      if (text.includes("危机")) return [1, 0, 0];
+      if (text.includes("思考")) return [0.9, 0.1, 0];
+      return [0, 1, 0];
+    };
+    const fake = new FakeLLMClient();
+    fake.replies = ["关于情感维度的深入思考", "关于危机维度的深入思考"];
+    const members: ChatMember[] = [
+      { id: "r1", kind: "agent", name: "危机线", description: "专注危机与转折", category: "proposer", systemPrompt: "你是危机线" },
+      { id: "r2", kind: "agent", name: "情感线", description: "专注感情戏", category: "proposer", systemPrompt: "你是情感线" },
+    ];
+    const session = new ChatSession({
+      projectId: "proj-6",
+      topic: "主角危机讨论",
+      members,
+      llm: fake as unknown as LLMClient,
+      vector: { embedding: new FakeEmbedding(route), store: new FakeVectorStore() },
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 0,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
+    });
+    await session.start();
+
+    const speakers = session
+      .getMessages()
+      .filter((m) => m.kind === "agent")
+      .map((m) => m.memberName);
+    expect(speakers[0]).toBe("危机线");
+    // 第二轮：最近发言「关于情感维度的深入思考」含「情感」关键词，关键词会偏向情感线；
+    // 但向量贴近「危机线」画像 → 危机线再次发言，证明向量相关性生效
+    expect(speakers[1]).toBe("危机线");
+  });
+
+  it("观点收敛经向量聚类触发共识：无关键词 / 低自评仅凭向量趋同即合成", async () => {
+    const route = (text: string): number[] => {
+      if (text.includes("主线")) return [1, 0, 0];
+      return [0, 1, 0];
+    };
+    const fake = new FakeLLMClient();
+    // 3 条 Agent 发言（都不含共识关键词、不带自评），第 4 条给合成者
+    fake.replies = [
+      "应当加强主线节奏",
+      "主线冲突需要再推进一步",
+      "主线节奏与冲突密度再强化",
+      "核心共识：主线节奏与冲突密度；综合方案：同步推进情感线。",
+    ];
+    const session = new ChatSession({
+      projectId: "proj-6",
+      topic: "主线推进",
+      members: makeMembersWithSynthesizer(),
+      llm: fake as unknown as LLMClient,
+      vector: { embedding: new FakeEmbedding(route), store: new FakeVectorStore() },
+      consensus: { requiredStreak: 2 },
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 4,
+    });
+    const events: ChatSessionEvent[] = [];
+    session.subscribe((e) => events.push(e));
+    await session.start();
+
+    // Agent 发言不含任何共识关键词与自评 → 收敛完全由向量聚类驱动
+    const agentMsgs = session
+      .getMessages()
+      .filter((m) => m.kind === "agent")
+      .map((m) => m.content);
+    expect(agentMsgs.length).toBe(3);
+    expect(agentMsgs.every((c) => !/(同意|一致|共识|认同|无异议|赞成)/.test(c))).toBe(true);
+    expect(agentMsgs.every((c) => !/【共识度/.test(c))).toBe(true);
+
+    // 达成共识并触发合成者总结
+    expect(events.some((e) => e.type === "consensus" && /开始合成/.test(e.data.message))).toBe(true);
+    const done = events.find((e) => e.type === "done") as { data: { status: string; summary?: string } } | undefined;
+    expect(done?.data.status).toBe("completed");
+    expect(done?.data.summary ?? "").toContain("核心共识");
+  });
+
+  it("Embedding 不可用时自动降级：讨论照常完成不报错", async () => {
+    const embedding = new FakeEmbedding(() => [1, 0, 0]);
+    embedding.ready = false; // ensureReady 返回 false
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-6",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      vector: { embedding, store: new FakeVectorStore(), readyTimeoutMs: 200 },
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
+    });
+    await session.start();
+
+    expect(session.getStatus()).toBe("completed");
+    expect(session.getMessages().length).toBe(2);
   });
 });

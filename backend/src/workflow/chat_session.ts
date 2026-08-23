@@ -14,6 +14,9 @@ import type { SpeakerSchedulerOptions } from "./speaker_scheduler.js";
 import { ConsensusDetector, stripSelfRating } from "./consensus_detector.js";
 import type { ConsensusDetectorOptions } from "./consensus_detector.js";
 import { ContextAssembler, type ContextAssemblerOptions } from "./context_assembler.js";
+import type { EmbeddingService } from "../vector/embedding.js";
+import type { VectorStore } from "../vector/store.js";
+import { VectorDiscussionContext } from "../vector/context.js";
 
 export type ChatSessionStatus = "idle" | "running" | "synthesizing" | "completed" | "terminated";
 
@@ -74,6 +77,13 @@ export interface ChatSessionConfig {
   random?: () => number;
   /** 话题相关性打分函数（默认关键词降级；工单 06 注入 Embedding 服务） */
   relevanceFn?: SpeakerSchedulerOptions["relevanceFn"];
+  /** 向量上下文（工单 06）：注入 Embedding + 向量存储；缺省则不启用向量相关性 / 收敛。 */
+  vector?: {
+    embedding?: EmbeddingService;
+    store?: VectorStore;
+    /** 向量就绪等待上限（ms），默认 4000；超时自动降级为关键词，不阻塞讨论。 */
+    readyTimeoutMs?: number;
+  };
   /** 共识检测配置（工单 04：阈值 / 连续轮数 / 收敛判定可注入；工单 06 注入向量聚类） */
   consensus?: ConsensusDetectorOptions;
   /** 上下文组装配置（工单 05：L1/L2 条数、token 预算等；测试注入小预算验证降级） */
@@ -110,6 +120,10 @@ export class ChatSession {
   private _authorInstructions: string[] = [];
   /** 上下文组装器（工单 05：系统提示 + 静态设定 + L3/L2/L1 + 触发消息 + 任务） */
   private _assembler: ContextAssembler;
+  /** 向量讨论上下文（工单 06：话题相关性 + 观点收敛；未注入时为 null，走纯降级） */
+  private _vectorContext: VectorDiscussionContext | null;
+  /** 向量就绪等待上限（ms），工单 06 */
+  private _vectorReadyTimeoutMs: number;
 
   constructor(config: ChatSessionConfig) {
     this.id = config.id ?? randomUUID();
@@ -122,13 +136,27 @@ export class ChatSession {
     this._idleTimeoutMs = config.idleTimeoutMs ?? 30000;
     this._backstopPollMs = 1000;
     this._nowFn = config.now ?? (() => Date.now());
+    this._vectorContext = config.vector
+      ? new VectorDiscussionContext({
+          embedding: config.vector.embedding,
+          store: config.vector.store,
+          random: config.random,
+        })
+      : null;
+    this._vectorReadyTimeoutMs = config.vector?.readyTimeoutMs ?? 4000;
     this._scheduler = new SpeakerScheduler(config.members, {
       cooldownMs: config.cooldownMs,
       now: config.now,
       random: config.random,
-      relevanceFn: config.relevanceFn,
+      relevanceFn: this._vectorContext
+        ? (member, recentText) => this._vectorContext!.relevance(member, recentText)
+        : config.relevanceFn,
     });
-    this._detector = new ConsensusDetector(config.consensus);
+    const consensusOptions: ConsensusDetectorOptions = { ...config.consensus };
+    if (!consensusOptions.convergenceFn && this._vectorContext) {
+      consensusOptions.convergenceFn = (recent) => this._vectorContext!.convergence(recent);
+    }
+    this._detector = new ConsensusDetector(consensusOptions);
     this._assembler = new ContextAssembler({
       sharedContextKeys: [],
       countTokens: this._llm.count_text_tokens.bind(this._llm),
@@ -160,7 +188,7 @@ export class ChatSession {
       this._emit({ type: "system", data: { message: `成员「${m.name}」已加入群聊`, memberId: m.id } });
     }
 
-    this._completion = this._drive().finally(() => {
+    this._completion = this._prepareAndDrive().finally(() => {
       this._updatedAt = new Date().toISOString();
     });
     return this._completion;
@@ -183,6 +211,10 @@ export class ChatSession {
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
     this._scheduler.trackMessage(record.content);
+    // 工单 06：作者发言进入向量上下文（供后续话题相关性 / 收敛聚类），失败静默
+    if (this._vectorContext) {
+      await this._vectorContext.trackText(record.id, record.content);
+    }
     // 工单 05：作者历史指令进入 L3 全局要点（保留最近 5 条）
     this._authorInstructions.push(text);
     if (this._authorInstructions.length > 5) this._authorInstructions.shift();
@@ -268,6 +300,37 @@ export class ChatSession {
 
   private _now(): number {
     return this._nowFn();
+  }
+
+  /**
+   * 工单 06：向量上下文预热（有界等待）。Embedding 模型 / Qdrant 未就绪时
+   * 在 readyTimeoutMs 内重试等待，超时则降级为关键词 + 随机，绝不阻塞讨论。
+   */
+  private async _prepareAndDrive(): Promise<void> {
+    if (this._vectorContext) {
+      await this._withTimeout(
+        this._vectorContext.ensureReady(this.members, this.staticContext),
+        this._vectorReadyTimeoutMs
+      );
+    }
+    await this._drive();
+  }
+
+  /** 有界等待：promise 与超时二者先到者返回；两侧都清理定时器，避免悬挂句柄。 */
+  private _withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+    return new Promise<T | null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), ms);
+      promise.then(
+        (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(null);
+        }
+      );
+    });
   }
 
   /**
@@ -399,6 +462,11 @@ export class ChatSession {
       timestamp: new Date().toISOString(),
       replyTo: this._messages.length > 0 ? this._messages[this._messages.length - 1]!.id : undefined,
     };
+    // 工单 06：向量化本条发言（供共识收敛聚类 + 话题相关性），失败静默；
+    // 必须在 evaluate 之前完成，保证收敛判定能看到本条发言的向量
+    if (this._vectorContext) {
+      await this._vectorContext.trackText(record.id, stripSelfRating(resp.content));
+    }
     // 工单 04：先用原文（含自评行）做共识检测，再剥离自评行上屏
     const evalResult = this._detector.evaluate(record);
     if (evalResult.warned && !evalResult.triggered && !this._consensusWarned) {
