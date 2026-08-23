@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ChatSession } from "../src/workflow/chat_session.js";
 import type { ChatSessionEvent, ChatMember, ChatMessageRecord } from "../src/workflow/chat_session.js";
+import { SpeakerScheduler } from "../src/workflow/speaker_scheduler.js";
 import type { LLMClient } from "../src/llm/client.js";
 
 class FakeLLMClient {
@@ -59,6 +60,11 @@ describe("ChatSession（工单 01：群聊骨架）", () => {
       topic: "第 10 章应该发生什么危机",
       members: makeMembers(),
       llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
       onEvent: (e) => events.push(e),
     });
 
@@ -88,6 +94,10 @@ describe("ChatSession（工单 01：群聊骨架）", () => {
       topic: "t",
       members: makeMembers(),
       llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      maxRounds: 1,
     });
     await session.start();
     expect(() => session.start()).toThrow(/已结束|运行/);
@@ -102,6 +112,11 @@ describe("ChatSession（工单 01：群聊骨架）", () => {
       topic: "t",
       members: makeMembers(),
       llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
       onEvent: (e) => events.push(e),
     });
 
@@ -144,6 +159,11 @@ describe("ChatSession（工单 01：群聊骨架）", () => {
       topic: "t",
       members: makeMembers(),
       llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
       onEvent: (e) => events.push(e),
     });
 
@@ -159,5 +179,187 @@ describe("ChatSession（工单 01：群聊骨架）", () => {
     expect(authorMsg).toBeTruthy();
     // 已完成的 Agent 生成不受影响
     expect(session.getMessages().filter((m) => m.kind === "agent").length).toBe(2);
+  });
+});
+
+describe("ChatSession（工单 02：意愿度调度）", () => {
+  it("任一时刻仅一位 Agent 在生成，无并发生成", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    fake.hold();
+    const session = new ChatSession({
+      projectId: "proj-2",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
+      onEvent: (e) => events.push(e),
+    });
+
+    const p = session.start();
+    // 第一个生成被 gate 卡住（thinking/generating 中）
+    await vi.waitFor(() => expect(fake.calls.length).toBe(1));
+
+    // 卡住期间不应有第二个 Agent 开始生成
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fake.calls.length).toBe(1);
+    const generating = events.filter((e) => e.type === "agent_status" && e.data.status === "generating");
+    expect(generating.length).toBe(1);
+
+    fake.release();
+    await p;
+    expect(session.getMessages().filter((m) => m.kind === "agent").length).toBe(2);
+  });
+
+  it("冷却生效：刚发言者在冷却期内让位给未发言成员", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-2",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      maxRounds: 2,
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.start();
+    const speakers = events.filter((e) => e.type === "speaker").map((e) => e.data.memberId);
+    // 初始 tie-break 让 r1 先发言；随后 r1 冷却让位给 r2
+    expect(speakers).toEqual(["r1", "r2"]);
+  });
+
+  it("30s 兜底：全部成员冷却中时强制最高分者开口，不冷场", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-2",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      maxRounds: 3,
+      cooldownMs: 60000,
+      idleTimeoutMs: 100,
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.start();
+    const speakers = events.filter((e) => e.type === "speaker").map((e) => e.data.memberId);
+    // 前两轮 r1/r2 各发言一次后全部进入冷却，第三轮由兜底强制开口
+    expect(speakers.length).toBe(3);
+    expect(session.getMessages().length).toBe(3);
+    const third = events.filter((e) => e.type === "speaker")[2]!.data;
+    // 被兜底强制开口者处于冷却中（cooldown < 0），证明兜底无视冷却
+    expect(third.scores.cooldown).toBeLessThan(0);
+  });
+
+  it("speaker 事件含得分明细，agent_status 反映思考/生成/完成", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-2",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      maxRounds: 2,
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.start();
+    const speakers = events.filter((e) => e.type === "speaker");
+    expect(speakers.length).toBe(2);
+    for (const s of speakers) {
+      const sc = s.data.scores;
+      expect(sc).toHaveProperty("mention");
+      expect(sc).toHaveProperty("wait");
+      expect(sc).toHaveProperty("relevance");
+      expect(sc).toHaveProperty("trait");
+      expect(sc).toHaveProperty("cooldown");
+      expect(sc).toHaveProperty("random");
+      expect(sc).toHaveProperty("total");
+      expect(typeof s.data.reason).toBe("string");
+      expect(s.data.reason.length).toBeGreaterThan(0);
+    }
+    const statuses = events.filter((e) => e.type === "agent_status").map((e) => e.data.status);
+    expect(statuses).toContain("thinking");
+    expect(statuses).toContain("generating");
+    expect(statuses).toContain("idle");
+  });
+});
+
+describe("SpeakerScheduler（工单 02 意愿度计算）", () => {
+  it("等待加成：久未发言者得分随等待时间上升", () => {
+    let clock = 0;
+    const scheduler = new SpeakerScheduler(makeMembers(), {
+      now: () => clock,
+      random: () => 0.5,
+      cooldownMs: 0,
+    });
+    scheduler.start(); // startedAt = 0
+    clock = 1000;
+    scheduler.recordTurn("r1"); // r1 刚发言
+    clock = 6000; // r1 等了 5s，r2 等了 6s（从会话开始未发言）
+    const scores = scheduler.computeScores();
+    const r1 = scores.find((s) => s.member.id === "r1")!;
+    const r2 = scores.find((s) => s.member.id === "r2")!;
+    expect(r1.breakdown.wait).toBe(5);
+    expect(r2.breakdown.wait).toBe(6);
+    expect(r2.breakdown.wait).toBeGreaterThan(r1.breakdown.wait);
+  });
+
+  it("冷却生效：刚发言者在冷却期内不被选为下一位", () => {
+    let clock = 0;
+    const scheduler = new SpeakerScheduler(makeMembers(), {
+      now: () => clock,
+      random: () => 0.5,
+      cooldownMs: 20000,
+    });
+    scheduler.start();
+    clock = 1000;
+    scheduler.recordTurn("r1");
+    expect(scheduler.pickNext()!.id).toBe("r2");
+  });
+
+  it("@ 召唤：被 @ 者获得强意愿加成，优先发言（无视冷却）并在发言后清除", () => {
+    let clock = 0;
+    const scheduler = new SpeakerScheduler(makeMembers(), {
+      now: () => clock,
+      random: () => 0.5,
+      cooldownMs: 60000,
+    });
+    scheduler.start();
+    clock = 1000;
+    scheduler.recordTurn("r1"); // r1 进入冷却
+    scheduler.mention("r1");
+    expect(scheduler.pickNext()!.id).toBe("r1"); // 无视冷却
+    // @ 加成在发言后清除
+    scheduler.recordTurn("r1");
+    const after = scheduler.computeScores().find((s) => s.member.id === "r1")!.breakdown.mention;
+    expect(after).toBe(0);
+  });
+
+  it("forceHighest：全部冷却时 pickNext 返回 null，兜底仍可返回最高分者", () => {
+    let clock = 0;
+    const scheduler = new SpeakerScheduler(makeMembers(), {
+      now: () => clock,
+      random: () => 0.5,
+      cooldownMs: 60000,
+    });
+    scheduler.start();
+    clock = 1000;
+    scheduler.recordTurn("r1");
+    scheduler.recordTurn("r2");
+    expect(scheduler.pickNext()).toBeNull();
+    expect(scheduler.forceHighest()).toBeTruthy();
   });
 });

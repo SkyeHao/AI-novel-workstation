@@ -9,6 +9,8 @@ import { randomUUID } from "node:crypto";
 import { ChatMessage, Role } from "../llm/models.js";
 import type { LLMClient } from "../llm/client.js";
 import type { AgentRoleCategory } from "../assets/agent_roles.js";
+import { SpeakerScheduler, type WillingnessBreakdown } from "./speaker_scheduler.js";
+import type { SpeakerSchedulerOptions } from "./speaker_scheduler.js";
 
 export type ChatSessionStatus = "idle" | "running" | "synthesizing" | "completed" | "terminated";
 
@@ -55,8 +57,18 @@ export interface ChatSessionConfig {
   /** 注入的静态设定（世界观 / 人物 / 大纲等），工单 05 正式组装进上下文 */
   staticContext?: Record<string, string>;
   llm: LLMClient;
-  /** 骨架阶段：每位成员发言的轮数（工单 02 由意愿度调度接管） */
+  /** 发言总预算（Agent 发言次数上限），默认 8；工单 04 达成共识可提前结束 */
   maxRounds?: number;
+  /** 兜底间隔（ms），默认 30000（距上一条发言超过该值且无人可选时强制开口） */
+  idleTimeoutMs?: number;
+  /** 冷却时长（ms），默认 20000 */
+  cooldownMs?: number;
+  /** 可注入时钟（测试用），默认 Date.now */
+  now?: () => number;
+  /** 可注入随机（测试用），默认 Math.random */
+  random?: () => number;
+  /** 话题相关性打分函数（默认关键词降级；工单 06 注入 Embedding 服务） */
+  relevanceFn?: SpeakerSchedulerOptions["relevanceFn"];
   onEvent?: (event: ChatSessionEvent) => void;
 }
 
@@ -72,12 +84,16 @@ export class ChatSession {
 
   private _llm: LLMClient;
   private _maxRounds: number;
+  private _idleTimeoutMs: number;
+  private _backstopPollMs: number;
   private _status: ChatSessionStatus = "idle";
   private _messages: ChatMessageRecord[] = [];
   private _listeners = new Set<(event: ChatSessionEvent) => void>();
   private _abort: AbortController | null = null;
   private _completion: Promise<void> | null = null;
   private _updatedAt: string;
+  private _nowFn: () => number;
+  private _scheduler: SpeakerScheduler;
 
   constructor(config: ChatSessionConfig) {
     this.id = config.id ?? randomUUID();
@@ -86,7 +102,16 @@ export class ChatSession {
     this.members = config.members;
     this.staticContext = config.staticContext ?? {};
     this._llm = config.llm;
-    this._maxRounds = config.maxRounds ?? 1;
+    this._maxRounds = config.maxRounds ?? 8;
+    this._idleTimeoutMs = config.idleTimeoutMs ?? 30000;
+    this._backstopPollMs = 1000;
+    this._nowFn = config.now ?? (() => Date.now());
+    this._scheduler = new SpeakerScheduler(config.members, {
+      cooldownMs: config.cooldownMs,
+      now: config.now,
+      random: config.random,
+      relevanceFn: config.relevanceFn,
+    });
     this.createdAt = new Date().toISOString();
     this._updatedAt = this.createdAt;
     if (config.onEvent) this.subscribe(config.onEvent);
@@ -105,6 +130,7 @@ export class ChatSession {
     this._status = "running";
     this._updatedAt = new Date().toISOString();
     this._abort = new AbortController();
+    this._scheduler.start();
 
     this._emit({ type: "system", data: { message: "讨论开始", status: this._status } });
     this._emit({ type: "system", data: { message: `讨论主题：${this.topic}` } });
@@ -134,6 +160,7 @@ export class ChatSession {
     };
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
+    this._scheduler.trackMessage(record.content);
     this._emit({ type: "chat_message", data: record });
     return record;
   }
@@ -199,17 +226,29 @@ export class ChatSession {
     }
   }
 
+  private _now(): number {
+    return this._nowFn();
+  }
+
   /**
-   * 骨架发言循环：轮流让每位成员发言一次（maxRounds 轮）。
-   * 工单 02 将替换为意愿度调度器（speaker 选择 + 冷却 + 等待加成 + 兜底）。
+   * 发言循环（工单 02 意愿度调度）：
+   * - 每次迭代由 SpeakerScheduler 选出当前意愿度最高的未冷却成员发言；
+   * - 若全部处于冷却（无人可选）则进入兜底等待：冷却到期自动恢复自然轮转，
+   *   超过 idleTimeoutMs 仍无人可选时强制最高分者开口（防冷场）；
+   * - 达到发言预算 maxRounds 或状态不再 running 时结束。
    */
   private async _drive(): Promise<void> {
     try {
-      for (let round = 0; round < this._maxRounds && this._status === "running"; round++) {
-        for (const member of this.members) {
-          if (this._status !== "running") break;
-          await this._runAgentTurn(member);
+      let turns = 0;
+      while (this._status === "running" && turns < this._maxRounds) {
+        let speaker = this._scheduler.pickNext(this._now());
+        if (!speaker) {
+          speaker = await this._waitForIdleBackstop();
+          if (!speaker) continue;
         }
+        await this._runAgentTurn(speaker);
+        this._scheduler.recordTurn(speaker.id);
+        turns += 1;
       }
       if (this._status === "running") {
         this._status = "completed";
@@ -224,13 +263,64 @@ export class ChatSession {
     }
   }
 
-  /** 让某位 Agent 发言：思考 → LLM 生成 → 上屏（chat_message）。 */
+  /**
+   * 兜底等待：全部成员冷却中时调用。以 idleTimeoutMs 为上限，期间：
+   * - 每隔 backstopPollMs 检查一次，冷却到期即有成员自然恢复 → 立即返回该成员；
+   * - 超过 idleTimeoutMs 仍无人可选 → 无视冷却强制最高分者（防冷场）；
+   * - 会话被终止 → 返回 null。
+   */
+  private async _waitForIdleBackstop(): Promise<ChatMember | null> {
+    const signal = this._abort?.signal;
+    if (signal?.aborted) return null;
+    return new Promise<ChatMember | null>((resolve) => {
+      let forceTimer: NodeJS.Timeout;
+      let pollTimer: NodeJS.Timeout;
+      const finish = (member: ChatMember | null): void => {
+        clearTimeout(forceTimer);
+        clearInterval(pollTimer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(member);
+      };
+      const onAbort = (): void => finish(null);
+      forceTimer = setTimeout(() => {
+        finish(this._status === "running" ? this._scheduler.forceHighest(this._now()) : null);
+      }, this._idleTimeoutMs);
+      pollTimer = setInterval(() => {
+        if (this._status !== "running") {
+          finish(null);
+          return;
+        }
+        const speaker = this._scheduler.pickNext(this._now());
+        if (speaker) finish(speaker);
+      }, this._backstopPollMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  /** 让某位 Agent 发言：发言权分配（speaker）→ 思考 → 生成 → 上屏（chat_message）。 */
   private async _runAgentTurn(member: ChatMember): Promise<void> {
+    // 发言权分配事件：附带意愿度得分明细，让调度透明可理解
+    const score =
+      this._scheduler.computeScores(this._now()).find((s) => s.member.id === member.id) ?? {
+        total: 0,
+        breakdown: { mention: 0, wait: 0, relevance: 0, trait: 0, cooldown: 0, random: 0 } as WillingnessBreakdown,
+        reason: "",
+      };
+    this._emit({
+      type: "speaker",
+      data: {
+        memberId: member.id,
+        memberName: member.name,
+        scores: { ...score.breakdown, total: score.total },
+        reason: score.reason,
+      },
+    });
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "thinking" } });
     const messages = [
       new ChatMessage(Role.SYSTEM, member.systemPrompt || "你是一位剧情讨论顾问。", undefined, member.name),
-      new ChatMessage(Role.USER, `讨论主题：${this.topic}\n\n请作为「${member.name}」发言。`),
+      new ChatMessage(Role.USER, "讨论主题：" + this.topic + "\n\n请作为「" + member.name + "」发言。"),
     ];
+    this._emit({ type: "agent_status", data: { memberId: member.id, status: "generating" } });
     const resp = await this._llm.achat(messages, {}, this._abort?.signal);
     if (this._status !== "running") return;
     const record: ChatMessageRecord = {
@@ -242,9 +332,11 @@ export class ChatSession {
       category: member.category,
       content: resp.content,
       timestamp: new Date().toISOString(),
+      replyTo: this._messages.length > 0 ? this._messages[this._messages.length - 1]!.id : undefined,
     };
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
+    this._scheduler.trackMessage(record.content);
     this._emit({ type: "chat_message", data: record });
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "idle" } });
   }
