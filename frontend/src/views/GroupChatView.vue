@@ -132,6 +132,31 @@
           </div>
         </div>
 
+        <!-- 应用最终方案（工单 08） -->
+        <div v-if="sessionStatus === 'completed' && summary" class="apply-panel">
+          <div class="apply-panel-info">
+            <el-icon class="apply-panel-icon"><Finished /></el-icon>
+            <div class="apply-panel-text">
+              <div class="apply-panel-title">讨论已完成，最终方案已生成</div>
+              <div class="apply-panel-desc">可将方案保存为参考文档，或合并进既有的大纲 / 人物设定。</div>
+            </div>
+          </div>
+          <div class="apply-panel-actions">
+            <el-button type="primary" plain :loading="applying === 'document'" @click="applyPlan('document')">
+              <el-icon style="margin-right: 4px"><DocumentAdd /></el-icon>
+              保存为文档
+            </el-button>
+            <el-button type="success" plain :loading="applying === 'outline'" @click="applyPlan('outline')">
+              <el-icon style="margin-right: 4px"><Memo /></el-icon>
+              应用到大纲
+            </el-button>
+            <el-button type="warning" plain :loading="applying === 'characters'" @click="applyPlan('characters')">
+              <el-icon style="margin-right: 4px"><User /></el-icon>
+              应用到人设
+            </el-button>
+          </div>
+        </div>
+
         <!-- 正在发言提示 -->
         <div v-if="speakingMemberId && isRunning" class="speaker-banner">
           <el-icon class="is-loading"><Loading /></el-icon>
@@ -214,6 +239,7 @@ import {
   startChatSession,
   sendChatMessage,
   stopChatSession,
+  applyChatPlan,
   chatSessionStream,
   type AgentRoleAsset,
   type AgentRoleCategory,
@@ -221,6 +247,7 @@ import {
   type ChatMessageRecord,
   type ChatSessionEvent,
   type ChatSessionStatus,
+  type ChatApplyTarget,
 } from '@/api'
 import { useCurrentProject } from '@/stores/currentProject'
 import PageHeader from '@/components/PageHeader.vue'
@@ -249,6 +276,8 @@ const topic = ref('')
 const members = ref<ChatMember[]>([])
 const messages = ref<ChatMessageRecord[]>([])
 const sessionStatus = ref<ChatSessionStatus>('idle')
+const summary = ref('')
+const applying = ref<'' | ChatApplyTarget>('')
 const memberStatus = ref<Record<string, 'thinking' | 'generating' | 'idle'>>({})
 const speakingMemberId = ref('')
 const speakingMemberName = ref('')
@@ -424,6 +453,7 @@ async function startChat() {
     members.value = data.members
     messages.value = []
     sessionStatus.value = data.status
+    summary.value = ''
     enterRoom()
   } catch (err: any) {
     console.error('开启群聊失败:', err)
@@ -536,7 +566,10 @@ function handleChatEvent(event: ChatSessionEvent) {
       sessionStatus.value = data.status || 'completed'
       speakingMemberId.value = ''
       speakingMemberName.value = ''
-      if (data.summary) pushSystemMessage('讨论总结：' + data.summary)
+      if (data.summary) {
+        summary.value = data.summary
+        pushSystemMessage('讨论总结：' + data.summary)
+      }
       pushSystemMessage(data.status === 'terminated' ? '讨论已终止' : '讨论已完成')
       sessionStorage.removeItem(SESSION_STORAGE_KEY)
       scrollToBottom()
@@ -599,6 +632,26 @@ function closeStream() {
   }
 }
 
+/** 工单 08：把最终方案落地到文档 / 大纲 / 人设。 */
+async function applyPlan(target: ChatApplyTarget) {
+  if (!sessionId.value || applying.value) return
+  applying.value = target
+  try {
+    const res = await applyChatPlan(sessionId.value, target)
+    const data = res.data
+    if (data.ok) {
+      ElMessage.success(data.message + (data.relPath ? '：' + data.relPath : ''))
+    } else {
+      ElMessage.warning(data.message || '应用失败')
+    }
+  } catch (err: any) {
+    console.error('应用最终方案失败:', err)
+    ElMessage.error((err?.response?.data?.error as string) || '应用失败')
+  } finally {
+    applying.value = ''
+  }
+}
+
 async function restoreSession() {
   const raw = sessionStorage.getItem(SESSION_STORAGE_KEY)
   if (!raw) return
@@ -616,6 +669,7 @@ async function restoreSession() {
     members.value = data.members
     messages.value = data.messages
     sessionStatus.value = data.status
+    summary.value = data.summary || ''
     enterRoom()
   } catch (err) {
     console.warn('恢复会话失败:', err)
@@ -841,6 +895,48 @@ onBeforeUnmount(() => {
   color: var(--accent);
   font-size: 13px;
   border-bottom: 1px solid var(--accent-border);
+}
+
+.apply-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--success-soft, rgba(103, 194, 58, 0.08));
+  border-bottom: 1px solid var(--success-border, rgba(103, 194, 58, 0.25));
+}
+
+.apply-panel-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 260px;
+}
+
+.apply-panel-icon {
+  font-size: 20px;
+  color: var(--el-color-success);
+  margin-top: 2px;
+}
+
+.apply-panel-title {
+  font-weight: 600;
+  color: var(--text-title);
+  font-size: 14px;
+}
+
+.apply-panel-desc {
+  color: var(--text-aux);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.apply-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .message-list {

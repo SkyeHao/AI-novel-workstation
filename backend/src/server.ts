@@ -13,7 +13,6 @@ import { filesRoutes } from "./api/routes/files.js";
 import { interactionsRoutes } from "./api/routes/interactions.js";
 import { agentRoutes } from "./api/routes/agent.js";
 import { agentRolesRoutes } from "./api/routes/agent_roles.js";
-import { discussionRoutes } from "./api/routes/discussions.js";
 import { chatSessionsRoutes } from "./api/routes/chat_sessions.js";
 
 export interface BuildAppOptions {
@@ -50,7 +49,6 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(interactionsRoutes, { prefix: "/api/interactions" });
   await app.register(agentRoutes, { prefix: "/api/agent" });
   await app.register(agentRolesRoutes, { prefix: "/api/agent-roles" });
-  await app.register(discussionRoutes, { prefix: "/api/discussions" });
   await app.register(chatSessionsRoutes, { prefix: "/api/chat-sessions" });
 
   return app;

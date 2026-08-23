@@ -18,6 +18,8 @@ import { TransformersEmbeddingService, type EmbeddingService } from "../../vecto
 import { QdrantVectorStore, type VectorStore } from "../../vector/store.js";
 import { FileChatStore } from "../../storage/chat_store.js";
 import type { ChatSessionSnapshot } from "../../workflow/chat_session.js";
+import type { LLMClient } from "../../llm/client.js";
+import { applyChatSessionPlan, CHAT_APPLY_TARGETS, type ChatApplyTarget } from "../../workflow/chat_apply.js";
 
 /** 内存中的群聊会话注册表（持久化与恢复见工单 07） */
 const _sessions = new Map<string, ChatSession>();
@@ -179,6 +181,53 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
     }
     return { success: true, status: session.getStatus() };
+  });
+
+  // ---- 应用最终方案（工单 08）：保存文档 / 应用大纲 / 应用人设 ----
+  app.post<{ Params: { id: string }; Body: { target?: string } }>("/:id/apply", async (req, reply) => {
+    const session = _sessions.get(req.params.id);
+    const snapshot = session ? session.getSnapshot() : loadFromDisk(req.params.id);
+    if (!snapshot) return reply.code(404).send({ error: "讨论会话不存在" });
+    if (snapshot.status !== "completed" || !snapshot.summary || !snapshot.summary.trim()) {
+      return reply.code(400).send({ error: "会话尚未完成，无最终方案可应用" });
+    }
+    const target = String(req.body?.target ?? "") as ChatApplyTarget;
+    if (!CHAT_APPLY_TARGETS.includes(target)) {
+      return reply.code(400).send({ error: "未知应用目标: " + target + "（可选：document / outline / characters）" });
+    }
+
+    let client: LLMClient;
+    try {
+      const logger = new InteractionLogger((it) => {
+        try {
+          saveInteraction("chat_apply", it, {
+            task_type: "text",
+            session_id: "chat:" + snapshot.id,
+            project_id: snapshot.projectId,
+          });
+        } catch (err) {
+          console.warn("保存群聊应用交互记录失败: " + (err instanceof Error ? err.message : String(err)));
+        }
+      });
+      client = getClientForTask("text", logger);
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+
+    try {
+      const result = await applyChatSessionPlan({
+        projectId: snapshot.projectId,
+        sessionId: snapshot.id,
+        topic: snapshot.topic,
+        summary: snapshot.summary,
+        target,
+        llm: client,
+        projectStore: getProjectStore(),
+      });
+      return result;
+    } catch (err) {
+      return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   // ---- SSE 实时事件流 ----

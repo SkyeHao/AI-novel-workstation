@@ -940,115 +940,6 @@ export const deleteAgentRole = (id: string) => apiClient.delete<{ success: boole
 export const duplicateAgentRole = (id: string) => apiClient.post<AgentRoleAsset>(`/agent-roles/${id}/duplicate`)
 
 
-// ============ 多 Agent 讨论（标准模式） ============
-
-export type DiscussionStatus = 'proposing' | 'review1' | 'synthesizing' | 'review2' | 'completed' | 'terminated'
-
-export interface DiscussionInput {
-  projectId: string
-  projectName: string
-  topic: string
-  context: {
-    worldview?: string
-    characters?: string
-    outline?: string
-    core_elements?: string
-    memory?: string
-  }
-}
-
-export interface AgentMessage {
-  roleId: string
-  roleName: string
-  category: string
-  content: string
-  round: number
-  type: 'proposal' | 'response' | 'synthesis'
-  elapsedMs: number
-}
-
-export interface SynthesisMeta {
-  systemPrompt: string
-  userPrompt: string
-  temperature: number
-  modelUsed: string
-  elapsedMs: number
-}
-
-export interface DiscussionSession {
-  id: string
-  projectId: string
-  topic: string
-  input: DiscussionInput
-  status: 'initial' | 'discussing' | 'synthesizing' | 'completed' | 'terminated'
-  currentRound: number
-  maxRounds: number
-  messages: AgentMessage[]
-  userInstructions: string[]
-  logs: string[]
-  synthesis?: string
-  createdAt: string
-  updatedAt: string
-}
-
-export interface DiscussionProgressResponse {
-  sessionId: string
-  status: 'initial' | 'discussing' | 'synthesizing' | 'completed' | 'terminated'
-  isRunning: boolean
-  currentRound: number
-  maxRounds: number
-  messages: AgentMessage[]
-  messagesCount: number
-  logs: string[]
-  updatedAt: string
-}
-
-export interface StartDiscussionResponse {
-  sessionId: string
-  status: DiscussionStatus
-  proposals: AgentProposal[]
-  logs: string[]
-}
-
-export interface SynthesizeResponse {
-  sessionId: string
-  status: DiscussionStatus
-  synthesis: string
-  synthesisMeta: SynthesisMeta
-  logs: string[]
-}
-
-// API 方法
-export const getDiscussionProgress = (sessionId: string) =>
-  apiClient.get<DiscussionProgressResponse>(`/discussions/${sessionId}/progress`)
-  export const getDiscussionSession = (sessionId: string) =>
-    apiClient.get<DiscussionSession>(`/discussions/${sessionId}`)
-
-
-export const startDiscussion = (data: DiscussionInput & { maxRounds?: number }) =>
-  apiClient.post<StartDiscussionResponse>('/discussions/start', data)
-
-export const updateProposals = (sessionId: string, proposals: Array<{ roleId: string; proposal?: string; deleted?: boolean }>) =>
-  apiClient.post<{ success: boolean; proposals: AgentProposal[] }>(`/discussions/${sessionId}/proposals`, { proposals })
-
-export const addInstruction = (sessionId: string, instruction: string) =>
-  apiClient.post<{ success: boolean; instructions: string[] }>(`/discussions/${sessionId}/instruction`, { instruction })
-
-export const synthesize = (sessionId: string) =>
-  apiClient.post<SynthesizeResponse>(`/discussions/${sessionId}/synthesize`)
-
-export const resynthesize = (sessionId: string) =>
-  apiClient.post<{ success: boolean; status: DiscussionStatus }>(`/discussions/${sessionId}/resynthesize`)
-
-export const completeDiscussion = (sessionId: string) =>
-  apiClient.post<{ success: boolean; status: DiscussionStatus }>(`/discussions/${sessionId}/complete`)
-
-export const terminateDiscussion = (sessionId: string) =>
-  apiClient.post<{ success: boolean; status: DiscussionStatus }>(`/discussions/${sessionId}/terminate`)
-
-export const deleteDiscussionSession = (sessionId: string) =>
-  apiClient.delete<{ success: boolean }>(`/discussions/${sessionId}`)
-
 export const getAggregatedInteractions = (params: { source?: string; limit?: number; offset?: number; session_id?: string; project_id?: string } = {}) =>
   apiClient.get<AggregatedInteractionResponse>('/interactions/aggregated', { params })
 
@@ -1095,6 +986,7 @@ export interface ChatSessionSnapshot {
   status: ChatSessionStatus
   createdAt: string
   updatedAt: string
+  summary?: string
 }
 
 export interface StartChatSessionRequest {
@@ -1116,6 +1008,11 @@ export const sendChatMessage = (sessionId: string, content: string) =>
 
 export const stopChatSession = (sessionId: string) =>
   apiClient.post<{ success: boolean; status: ChatSessionStatus }>(`/chat-sessions/${sessionId}/stop`)
+
+export type ChatApplyTarget = 'document' | 'outline' | 'characters'
+
+export const applyChatPlan = (sessionId: string, target: ChatApplyTarget) =>
+  apiClient.post<{ target: ChatApplyTarget; ok: boolean; message: string; relPath?: string; data?: Record<string, unknown> }>(`/chat-sessions/${sessionId}/apply`, { target })
 
 export async function* chatSessionStream(sessionId: string): AsyncGenerator<ChatSessionEvent> {
   const response = await fetch(`/api/chat-sessions/${sessionId}/stream`, {

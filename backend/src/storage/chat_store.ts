@@ -84,14 +84,14 @@ export class FileChatStore implements ChatStore {
   save(snapshot: ChatSessionSnapshot): void {
     const { summary, consensusNodes, ...record } = snapshot;
     // 按 id 合并已有消息（追加不删除）：避免携带旧快照的 save 覆盖掉新追加的消息
-    const existing = this._read<{ messages?: Array<{ id?: string }> }>(
+    const existing = this._read<{ messages?: Array<{ id?: string; [k: string]: unknown }> }>(
       this._recordFile(snapshot.projectId, snapshot.id)
     );
     if (existing && Array.isArray(existing.messages) && Array.isArray(record.messages)) {
       const seen = new Set(record.messages.map((m) => m.id));
       for (const m of existing.messages) {
         if (m && m.id && !seen.has(m.id)) {
-          record.messages.push(m);
+          record.messages.push(m as unknown as ChatSessionSnapshot["messages"][number]);
           seen.add(m.id);
         }
       }
