@@ -6,7 +6,7 @@ import type { LLMClient } from "../src/llm/client.js";
 
 class FakeLLMClient {
   config = { model: "fake", apiKey: "fake", baseUrl: "fake", temperature: 0, maxTokens: 100, timeout: 10, maxRetries: 0 };
-  calls: Array<{ content: string }> = [];
+  calls: Array<{ content: string; systemPrompt?: string; userPrompt?: string }> = [];
   failWith: Error | null = null;
   /** 按序弹出的回复队列；耗尽后回退到默认发言 */
   replies: string[] = [];
@@ -37,7 +37,9 @@ class FakeLLMClient {
 
   async achat(messages: Array<{ role: string; content?: string; name?: string | null }>): Promise<{ content: string; model: string }> {
     const name = (messages[0] as { name?: string | null } | undefined)?.name ?? "角色";
-    this.calls.push({ content: name });
+    const systemPrompt = (messages[0] as { content?: string } | undefined)?.content ?? "";
+    const userPrompt = (messages[1] as { content?: string } | undefined)?.content ?? "";
+    this.calls.push({ content: name, systemPrompt, userPrompt });
     if (this.gate) await this.gate;
     if (this.failWith) throw this.failWith;
     const content = this.replies.length > 0 ? this.replies.shift()! : "这是「" + name + "」的发言";
@@ -587,5 +589,182 @@ describe("ChatSession（工单 04：共识检测与合成者总结）", () => {
     expect(session.getStatus()).toBe("terminated");
     expect(events.some((e) => e.type === "done")).toBe(false);
     expect(events.some((e) => e.type === "consensus" && /开始合成/.test(e.data.message))).toBe(false);
+  });
+});
+
+describe("ChatSession（工单 05：分层上下文组装）", () => {
+  const STATIC = {
+    worldview: "蒸汽朋克架空世界，帝国与联邦对立",
+    characters: "主角林澈，机械师；配角苏婉，情报官",
+    current_chapter: "第 10 章：帝国入侵边境",
+  };
+
+  function makeMembersWithContext(): ChatMember[] {
+    return [
+      {
+        id: "r1",
+        kind: "agent",
+        name: "冲突制造者",
+        description: "专注戏剧冲突",
+        category: "proposer",
+        systemPrompt: "你是冲突制造者",
+        sharedContextKeys: ["worldview", "characters"],
+      },
+      { id: "r2", kind: "agent", name: "情感锚点", description: "关注人物情感", category: "proposer", systemPrompt: "你是情感锚点" },
+    ];
+  }
+
+  it("系统提示含角色定位；静态设定按 sharedContextKeys 注入，无键角色回退全量", async () => {
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-5",
+      topic: "帝国入侵后的第一反应",
+      members: makeMembersWithContext(),
+      staticContext: STATIC,
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
+    });
+    await session.start();
+
+    // 第 1 位：冲突制造者（r1），按自己的 sharedContextKeys 注入 worldview / characters
+    const first = fake.calls[0]!.userPrompt;
+    expect(fake.calls[0]!.systemPrompt).toContain("你是冲突制造者");
+    expect(fake.calls[0]!.systemPrompt).toContain("专注戏剧冲突");
+    expect(first).toContain("【静态设定】");
+    expect(first).toContain("蒸汽朋克架空世界");
+    expect(first).toContain("主角林澈");
+    expect(first).not.toContain("帝国入侵边境");
+
+    // 第 2 位：情感锚点（r2）无 sharedContextKeys → 回退全量静态设定
+    const second = fake.calls[1]!.userPrompt;
+    expect(second).toContain("【静态设定】");
+    expect(second).toContain("帝国入侵边境");
+  });
+
+  it("作者历史指令进入 L3 全局要点，影响后续 Agent 发言", async () => {
+    const fake = new FakeLLMClient();
+    fake.hold();
+    const session = new ChatSession({
+      projectId: "proj-5",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 2,
+    });
+
+    const p = session.start();
+    await vi.waitFor(() => expect(fake.calls.length).toBe(1));
+    await session.sendUserMessage("请确保主角动机自洽");
+    fake.release();
+    await p;
+
+    expect(fake.calls.length).toBe(2);
+    const second = fake.calls[1]!.userPrompt;
+    expect(second).toContain("【全局要点】");
+    expect(second).toContain("作者历史指令");
+    expect(second).toContain("请确保主角动机自洽");
+  });
+
+  it("上下文分层顺序：静态设定 → L3 → L2 → L1 → 回应对象 → 任务", async () => {
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-5",
+      topic: "t",
+      members: makeMembersWithContext(),
+      staticContext: STATIC,
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 4,
+      context: { l1Count: 1, l2Count: 2 },
+    });
+    await session.start();
+
+    // 最后一轮（第 4 次调用）已有足够历史：L2 与 L1 同时出现
+    const last = fake.calls[3]!.userPrompt;
+    const markers = ["【静态设定】", "【全局要点】", "【近期脉络】", "【最近对话】", "【回应对象】", "请作为"];
+    const idx = markers.map((m) => last.indexOf(m));
+    for (const i of idx) expect(i).toBeGreaterThanOrEqual(0);
+    for (let i = 0; i < idx.length - 1; i++) {
+      expect(idx[i]!).toBeLessThan(idx[i + 1]!);
+    }
+  });
+
+  it("发言携带回应引用：replyTo 指向被回应消息，触发层含原文", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-5",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 3,
+      onEvent: (e) => events.push(e),
+    });
+    await session.start();
+
+    const agentMsgs = events.filter((e) => e.type === "chat_message" && e.data.kind === "agent") as Array<{ data: ChatMessageRecord }>;
+    expect(agentMsgs.length).toBe(3);
+    expect(agentMsgs[1]!.data.replyTo).toBe(agentMsgs[0]!.data.id);
+    const second = fake.calls[1]!.userPrompt;
+    expect(second).toContain("【回应对象】");
+    expect(second).toContain("这是「冲突制造者」的发言");
+  });
+
+  it("超预算时降级：截断静态超长值并保留任务指令", async () => {
+    const fake = new FakeLLMClient();
+    const longStatic = { worldview: "世".repeat(600), characters: "主角林澈" };
+    const session = new ChatSession({
+      projectId: "proj-5",
+      topic: "t",
+      members: makeMembersWithContext(),
+      staticContext: longStatic,
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 1,
+      context: { maxTokens: 300, countTokens: (t: string) => Math.ceil(t.length / 2) },
+    });
+    await session.start();
+
+    const first = fake.calls[0]!.userPrompt;
+    expect(first).toContain("已截断");
+    expect(first).toContain("请作为");
+  });
+
+  it("超预算优先压缩 L2 近期脉络（降级摘要粒度）", async () => {
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-5",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 4,
+      context: { l1Count: 1, l2Count: 3, maxTokens: 105, countTokens: (t: string) => Math.ceil(t.length / 2) },
+    });
+    await session.start();
+
+    const last = fake.calls[3]!.userPrompt;
+    expect(last).toContain("近期脉络已压缩");
   });
 });

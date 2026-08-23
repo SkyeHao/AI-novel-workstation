@@ -28,6 +28,7 @@ function roleToMember(roleId: string): ChatMember {
     description: role.description,
     category: role.category,
     systemPrompt: role.systemPrompt,
+    sharedContextKeys: role.contextConfig?.sharedContextKeys,
   };
 }
 

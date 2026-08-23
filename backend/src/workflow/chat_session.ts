@@ -13,6 +13,7 @@ import { SpeakerScheduler, type WillingnessBreakdown } from "./speaker_scheduler
 import type { SpeakerSchedulerOptions } from "./speaker_scheduler.js";
 import { ConsensusDetector, stripSelfRating } from "./consensus_detector.js";
 import type { ConsensusDetectorOptions } from "./consensus_detector.js";
+import { ContextAssembler, type ContextAssemblerOptions } from "./context_assembler.js";
 
 export type ChatSessionStatus = "idle" | "running" | "synthesizing" | "completed" | "terminated";
 
@@ -24,6 +25,8 @@ export interface ChatMember {
   category: AgentRoleCategory;
   /** 角色系统提示词（来自角色蓝图），工单 05 将扩展为完整上下文组装 */
   systemPrompt?: string;
+  /** 角色注入的静态设定键（来自角色蓝图的 contextConfig.sharedContextKeys，工单 05） */
+  sharedContextKeys?: string[];
 }
 
 export interface ChatMessageRecord {
@@ -73,6 +76,8 @@ export interface ChatSessionConfig {
   relevanceFn?: SpeakerSchedulerOptions["relevanceFn"];
   /** 共识检测配置（工单 04：阈值 / 连续轮数 / 收敛判定可注入；工单 06 注入向量聚类） */
   consensus?: ConsensusDetectorOptions;
+  /** 上下文组装配置（工单 05：L1/L2 条数、token 预算等；测试注入小预算验证降级） */
+  context?: ContextAssemblerOptions;
   onEvent?: (event: ChatSessionEvent) => void;
 }
 
@@ -101,6 +106,10 @@ export class ChatSession {
   private _detector: ConsensusDetector;
   /** 是否已推送过「接近共识」预警（防止重复） */
   private _consensusWarned = false;
+  /** 作者历史指令（最近 5 条），进入 L3 全局要点（工单 05） */
+  private _authorInstructions: string[] = [];
+  /** 上下文组装器（工单 05：系统提示 + 静态设定 + L3/L2/L1 + 触发消息 + 任务） */
+  private _assembler: ContextAssembler;
 
   constructor(config: ChatSessionConfig) {
     this.id = config.id ?? randomUUID();
@@ -120,6 +129,11 @@ export class ChatSession {
       relevanceFn: config.relevanceFn,
     });
     this._detector = new ConsensusDetector(config.consensus);
+    this._assembler = new ContextAssembler({
+      sharedContextKeys: [],
+      countTokens: this._llm.count_text_tokens.bind(this._llm),
+      ...config.context,
+    });
     this.createdAt = new Date().toISOString();
     this._updatedAt = this.createdAt;
     if (config.onEvent) this.subscribe(config.onEvent);
@@ -169,6 +183,9 @@ export class ChatSession {
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
     this._scheduler.trackMessage(record.content);
+    // 工单 05：作者历史指令进入 L3 全局要点（保留最近 5 条）
+    this._authorInstructions.push(text);
+    if (this._authorInstructions.length > 5) this._authorInstructions.shift();
     // 工单 03：解析 @角色名 定向召唤，被 @ 者获得强意愿加成
     const mentionedIds = this._resolveMentions(text);
     for (const id of mentionedIds) {
@@ -348,15 +365,25 @@ export class ChatSession {
       },
     });
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "thinking" } });
+    // 工单 05：分层上下文组装（系统提示 + 静态设定 + L3/L2/L1 + 触发消息 + 任务），按预算降级
+    const triggerMessage = this._messages.length > 0 ? this._messages[this._messages.length - 1] : undefined;
+    const taskPrompt =
+      "讨论主题：" + this.topic +
+      "\n\n请作为「" + member.name + "」发言，承接最近的讨论并发表你的观点。" +
+      "\n\n发言要求：请在结尾单独一行输出你的共识自评，格式：【共识度：0~1】。" +
+      "0 表示完全不认同当前讨论方向，1 表示完全达成一致。";
+    const assembled = this._assembler.assemble({
+      member,
+      topic: this.topic,
+      messages: this._messages,
+      staticContext: this.staticContext,
+      triggerMessage,
+      authorInstructions: this._authorInstructions,
+      taskPrompt,
+    });
     const messages = [
-      new ChatMessage(Role.SYSTEM, member.systemPrompt || "你是一位剧情讨论顾问。", undefined, member.name),
-      new ChatMessage(
-        Role.USER,
-        "讨论主题：" + this.topic +
-          "\n\n请作为「" + member.name + "」发言，承接最近的讨论并发表你的观点。" +
-          "\n\n发言要求：请在结尾单独一行输出你的共识自评，格式：【共识度：0~1】。" +
-          "0 表示完全不认同当前讨论方向，1 表示完全达成一致。"
-      ),
+      new ChatMessage(Role.SYSTEM, assembled.systemPrompt, undefined, member.name),
+      new ChatMessage(Role.USER, assembled.userPrompt),
     ];
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "generating" } });
     const resp = await this._llm.achat(messages, {}, this._abort?.signal);
