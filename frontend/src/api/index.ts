@@ -17,6 +17,7 @@ export interface Project {
   states_enabled: string[]
   created_at: string
   updated_at: string
+  character_dimensions?: CharacterDimension[]
 }
 
 export interface ProjectCreate {
@@ -36,6 +37,143 @@ export interface ProjectUpdate {
   idea?: string
   work_unit?: string
   states_enabled?: string[]
+  character_dimensions?: CharacterDimension[]
+}
+
+export interface CharacterDimension {
+  key: string
+  label: string
+  hint: string
+  core?: boolean
+}
+
+export interface CharacterStateTemplate {
+  id: string
+  label: string
+  description: string
+  dimensions: CharacterDimension[]
+}
+
+// ============ 世界观模板 ============
+
+export type WorldviewDimensionType = 'text' | 'textarea' | 'tags' | 'list' | 'select'
+
+export interface WorldviewDimension {
+  key: string
+  label: string
+  hint: string
+  type: WorldviewDimensionType
+  required: boolean
+  placeholder?: string
+  options?: string[]
+}
+
+export interface WorldviewTemplate {
+  id: string
+  label: string
+  description: string
+  dimensions: WorldviewDimension[]
+}
+
+export interface WorldviewData {
+  template_id: string
+  dimensions: Record<string, any>
+}
+
+// ============ 人物模板 ============
+
+export type CharacterTemplateDimensionType = 'text' | 'textarea' | 'tags' | 'select'
+
+export interface CharacterTemplateDimension {
+  key: string
+  label: string
+  hint: string
+  type: CharacterTemplateDimensionType
+  required: boolean
+  placeholder?: string
+  options?: string[]
+}
+
+export interface CharacterTemplate {
+  id: string
+  label: string
+  description: string
+  dimensions: CharacterTemplateDimension[]
+}
+
+export interface CharacterRelation {
+  target_id: string
+  target_name: string
+  type: string
+  description?: string
+}
+
+export interface CharacterEntry {
+  id: string
+  name: string
+  role: 'protagonist' | 'supporter' | 'antagonist' | 'neutral'
+  dimensions: Record<string, any>
+  relations?: CharacterRelation[]
+}
+
+export interface CharactersData {
+  template_id: string
+  characters: CharacterEntry[]
+}
+
+// ============ 大纲模板 ============
+
+export type OutlineNodeType = 'story' | 'volume' | 'arc' | 'chapter'
+
+export interface OutlineNodeProperty {
+  key: string
+  label: string
+  hint: string
+  type: 'text' | 'textarea' | 'number' | 'tags'
+  required: boolean
+  placeholder?: string
+}
+
+export interface OutlineTemplate {
+  id: string
+  label: string
+  description: string
+  structure: OutlineNodeType[]
+  nodeProperties: Record<OutlineNodeType, OutlineNodeProperty[]>
+}
+
+export interface OutlineNode {
+  type: string
+  [key: string]: any
+  children?: OutlineNode[]
+}
+
+export interface OutlineData {
+  template_id: string
+  root: OutlineNode
+}
+
+// ============ 风格模板 ============
+
+export interface StyleDimension {
+  key: string
+  label: string
+  hint: string
+  type: 'text' | 'textarea' | 'select' | 'tags'
+  required: boolean
+  options?: string[]
+}
+
+export interface StyleTemplate {
+  id: string
+  label: string
+  description: string
+  dimensions: StyleDimension[]
+}
+
+export interface StyleData {
+  template_id: string
+  dimensions: Record<string, any>
 }
 
 export interface ModelEntry {
@@ -237,6 +375,7 @@ export type AgentStreamEvent =
   | { type: 'thinking'; data: string }
   | { type: 'ask'; data: AskQuestion }
   | { type: 'done'; data: AgentTurnResult }
+  | { type: 'aborted'; data: Partial<AgentTurnResult> & { error?: string } }
   | { type: 'error'; data: { error: string } }
 
 export interface AgentSessionMeta {
@@ -328,6 +467,61 @@ export interface MemoryOverview {
   stats: { facts: number; foreshadow: number; characters: number; summaries: number }
 }
 
+
+// ============ Agent 角色蓝图 ============
+
+export type AgentRoleCategory = 'proposer' | 'synthesizer' | 'reviewer'
+
+export interface AgentRoleModelConfig {
+  mode: 'reference' | 'custom'
+  globalConfigId?: string
+  custom?: {
+    modelId: string
+    temperature: number
+    maxTokens?: number
+    topP?: number
+  }
+}
+
+export interface AgentRoleContextConfig {
+  sharedContextKeys: string[]
+  roleFocusHint: string
+}
+
+export interface AgentRoleAsset {
+  id: string
+  name: string
+  description: string
+  category: AgentRoleCategory
+  systemPrompt: string
+  promptVariables?: string[]
+  modelConfig: AgentRoleModelConfig
+  contextConfig: AgentRoleContextConfig
+  createdAt: string
+  updatedAt: string
+  isBuiltin: boolean
+}
+
+export interface CreateAgentRoleRequest {
+  name: string
+  description: string
+  category: AgentRoleCategory
+  systemPrompt: string
+  promptVariables?: string[]
+  modelConfig?: AgentRoleModelConfig
+  contextConfig?: AgentRoleContextConfig
+}
+
+export interface UpdateAgentRoleRequest {
+  name?: string
+  description?: string
+  category?: AgentRoleCategory
+  systemPrompt?: string
+  promptVariables?: string[]
+  modelConfig?: AgentRoleModelConfig
+  contextConfig?: AgentRoleContextConfig
+}
+
 // ============ axios 实例 ============
 
 const apiClient = axios.create({
@@ -340,6 +534,11 @@ export const healthCheck = () => apiClient.get<{ status: string }>('/health')
 // ============ 项目 ============
 
 export const getProjects = () => apiClient.get<Project[]>('/projects')
+export const getCharacterStateTemplates = () => apiClient.get<CharacterStateTemplate[]>('/config/character-state-templates')
+export const getWorldviewTemplates = () => apiClient.get<WorldviewTemplate[]>('/config/worldview-templates')
+export const getCharacterTemplates = () => apiClient.get<CharacterTemplate[]>('/config/character-templates')
+export const getOutlineTemplates = () => apiClient.get<OutlineTemplate[]>('/config/outline-templates')
+export const getStyleTemplates = () => apiClient.get<StyleTemplate[]>('/config/style-templates')
 export const createProject = (data: ProjectCreate) => apiClient.post<Project>('/projects', data)
 export const getProject = (projectId: string) => apiClient.get<Project>(`/projects/${projectId}`)
 export const updateProject = (projectId: string, data: ProjectUpdate) =>
@@ -402,6 +601,17 @@ export interface Style {
 export type SettingType = 'worldview' | 'characters' | 'outline' | 'style'
 export type SettingData = Worldview | Characters | Outline | Style
 
+export interface SettingsSummaryItem {
+  type: string
+  label: string
+  exists: boolean
+  count: number
+}
+
+/** 静态设定聚合（各类型存在性与数量，供设定页统计导航） */
+export const getSettingsSummary = (projectId: string) =>
+  apiClient.get<{ settings: SettingsSummaryItem[] }>(`/projects/${projectId}/settings`)
+
 export const getSetting = (projectId: string, settingType: SettingType) =>
   apiClient.get<SettingData>(`/projects/${projectId}/settings/${settingType}`)
 export const saveSetting = (projectId: string, settingType: SettingType, data: SettingData) =>
@@ -411,6 +621,27 @@ export const generateSettings = (projectId: string, settingType: SettingType | '
     `/workflow/${projectId}/settings/generate`,
     { setting_type: settingType }
   )
+
+/** 动态设定账本（只读，由正文章末自动回写） */
+export const getDynamicAccount = (projectId: string, account: string) =>
+  apiClient.get<{ account: string; exists: boolean; kind: string; data: Record<string, any> | null }>(
+    `/projects/${projectId}/dynamic/${account}`
+  )
+
+/** 动态设定账本聚合（全部账本 + 统计，供工作台总览） */
+export const getDynamicAccounts = (projectId: string) =>
+  apiClient.get<{
+    accounts: Array<{
+      account: string
+      label: string
+      kind: string
+      description: string
+      exists: boolean
+      count: number
+      updated_at: string | null
+      last_chapter: number | null
+    }>
+  }>(`/projects/${projectId}/dynamic`)
 
 export const getPrereqCheck = (projectId: string) =>
   apiClient.get<PrereqCheckResult>(`/projects/${projectId}/prereq-check`)
@@ -428,9 +659,16 @@ export interface ProjectDocument {
   path: string
   size: number
   modified: number
+  kind?: string
+  title?: string
+  work_unit?: string | null
 }
 export const getProjectDocuments = (projectId: string) =>
   apiClient.get<{ documents: ProjectDocument[] }>(`/projects/${projectId}/documents`)
+export const getProjectDocumentsByKind = (projectId: string, kind: string) =>
+  apiClient.get<{ documents: ProjectDocument[] }>(`/projects/${projectId}/documents`, {
+    params: { kind },
+  })
 export const readProjectDocument = (projectId: string, relPath: string) =>
   apiClient.get<{ success: boolean; content: string; error: string }>('/files/read', {
     params: { path: `${projectId}/${relPath}` },
@@ -449,14 +687,14 @@ export const getProjectMemory = (projectId: string) =>
 
 // ============ Agent 窗口 ============
 
-export const getAgentContext = (projectId: string) =>
-  apiClient.get<AgentContext>('/agent/context', { params: { project_id: projectId } })
+export const getAgentContext = (projectId: string, sessionId?: string) =>
+  apiClient.get<AgentContext>('/agent/context', { params: { project_id: projectId, session_id: sessionId || undefined } })
 
 export const agentTurn = (projectId: string, message: string, toolCallMode = 'jsonfc', sessionId?: string) =>
   apiClient.post<AgentTurnResult>('/agent/turn', { project_id: projectId, message, tool_call_mode: toolCallMode, session_id: sessionId || undefined })
 
-export const agentSwitchState = (projectId: string, state: string, workUnit?: string) =>
-  apiClient.post('/agent/switch-state', { project_id: projectId, state, work_unit: workUnit })
+export const agentSwitchState = (projectId: string, state: string, workUnit?: string, sessionId?: string) =>
+  apiClient.post('/agent/switch-state', { project_id: projectId, state, work_unit: workUnit, session_id: sessionId })
 
 // ---- Agent 会话管理（按书多会话，持久化于项目目录） ----
 
@@ -480,6 +718,9 @@ export const getAgentPendingAsk = (projectId: string, sessionId: string) =>
 
 export const agentAnswer = (projectId: string, answer: string, sessionId?: string) =>
   apiClient.post('/agent/answer', { project_id: projectId, answer, session_id: sessionId || undefined })
+
+export const agentTurnStop = (projectId: string, sessionId?: string) =>
+  apiClient.post('/agent/turn/stop', { project_id: projectId, session_id: sessionId || undefined })
 
 /** Agent SSE 流式解析（step/chunk/thinking/ask/done/error） */
 export async function* agentTurnStream(projectId: string, message: string, sessionId?: string): AsyncGenerator<AgentStreamEvent> {
@@ -519,6 +760,7 @@ export async function* agentTurnStream(projectId: string, message: string, sessi
       else if (evt === 'thinking') { try { yield { type: 'thinking', data: JSON.parse(dataLine) } } catch { yield { type: 'thinking', data: dataLine } } }
       else if (evt === 'ask') yield { type: 'ask', data: JSON.parse(dataLine) }
       else if (evt === 'done') yield { type: 'done', data: JSON.parse(dataLine) }
+      else if (evt === 'aborted') yield { type: 'aborted', data: JSON.parse(dataLine) }
       else if (evt === 'error') {
         try {
           yield { type: 'error', data: JSON.parse(dataLine) }
@@ -624,6 +866,7 @@ export interface InteractionListItem {
   error: string
   timestamp: string
   created_at: string
+  project_id: string
   session_id: string
   turn_id: string
   user_message: string
@@ -634,6 +877,27 @@ export interface InteractionListItem {
 
 export interface InteractionListResponse {
   items: InteractionListItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/** 聚合后的交互记录（一次用户消息 + 所有相关LLM调用） */
+export interface AggregatedInteraction {
+  turn_id: string
+  user_message: string
+  project_id: string
+  session_id: string
+  session_title: string
+  timestamp: string
+  total_tokens: number
+  total_elapsed_ms: number
+  has_error: boolean
+  records: InteractionListItem[]
+}
+
+export interface AggregatedInteractionResponse {
+  items: AggregatedInteraction[]
   total: number
   limit: number
   offset: number
@@ -664,3 +928,253 @@ export const deleteSessionInteractions = (sessionId: string) =>
   apiClient.delete<DeleteResult & { deleted_count?: number }>(`/interactions/by-session/${sessionId}`)
 export const clearInteractions = (source?: string) =>
   apiClient.delete<DeleteResult>('/interactions', { params: { source } })
+
+
+// ============ Agent 角色蓝图 ============
+
+export const getAgentRoles = () => apiClient.get<AgentRoleAsset[]>('/agent-roles')
+export const getAgentRole = (id: string) => apiClient.get<AgentRoleAsset>(`/agent-roles/${id}`)
+export const createAgentRole = (data: CreateAgentRoleRequest) => apiClient.post<AgentRoleAsset>('/agent-roles', data)
+export const updateAgentRole = (id: string, data: UpdateAgentRoleRequest) => apiClient.put<AgentRoleAsset>(`/agent-roles/${id}`, data)
+export const deleteAgentRole = (id: string) => apiClient.delete<{ success: boolean }>(`/agent-roles/${id}`)
+export const duplicateAgentRole = (id: string) => apiClient.post<AgentRoleAsset>(`/agent-roles/${id}/duplicate`)
+
+
+// ============ 多 Agent 讨论（标准模式） ============
+
+export type DiscussionStatus = 'proposing' | 'review1' | 'synthesizing' | 'review2' | 'completed' | 'terminated'
+
+export interface DiscussionInput {
+  projectId: string
+  projectName: string
+  topic: string
+  context: {
+    worldview?: string
+    characters?: string
+    outline?: string
+    core_elements?: string
+    memory?: string
+  }
+}
+
+export interface AgentMessage {
+  roleId: string
+  roleName: string
+  category: string
+  content: string
+  round: number
+  type: 'proposal' | 'response' | 'synthesis'
+  elapsedMs: number
+}
+
+export interface SynthesisMeta {
+  systemPrompt: string
+  userPrompt: string
+  temperature: number
+  modelUsed: string
+  elapsedMs: number
+}
+
+export interface DiscussionSession {
+  id: string
+  projectId: string
+  topic: string
+  input: DiscussionInput
+  status: 'initial' | 'discussing' | 'synthesizing' | 'completed' | 'terminated'
+  currentRound: number
+  maxRounds: number
+  messages: AgentMessage[]
+  userInstructions: string[]
+  logs: string[]
+  synthesis?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface DiscussionProgressResponse {
+  sessionId: string
+  status: 'initial' | 'discussing' | 'synthesizing' | 'completed' | 'terminated'
+  isRunning: boolean
+  currentRound: number
+  maxRounds: number
+  messages: AgentMessage[]
+  messagesCount: number
+  logs: string[]
+  updatedAt: string
+}
+
+export interface StartDiscussionResponse {
+  sessionId: string
+  status: DiscussionStatus
+  proposals: AgentProposal[]
+  logs: string[]
+}
+
+export interface SynthesizeResponse {
+  sessionId: string
+  status: DiscussionStatus
+  synthesis: string
+  synthesisMeta: SynthesisMeta
+  logs: string[]
+}
+
+// API 方法
+export const getDiscussionProgress = (sessionId: string) =>
+  apiClient.get<DiscussionProgressResponse>(`/discussions/${sessionId}/progress`)
+  export const getDiscussionSession = (sessionId: string) =>
+    apiClient.get<DiscussionSession>(`/discussions/${sessionId}`)
+
+
+export const startDiscussion = (data: DiscussionInput & { maxRounds?: number }) =>
+  apiClient.post<StartDiscussionResponse>('/discussions/start', data)
+
+export const updateProposals = (sessionId: string, proposals: Array<{ roleId: string; proposal?: string; deleted?: boolean }>) =>
+  apiClient.post<{ success: boolean; proposals: AgentProposal[] }>(`/discussions/${sessionId}/proposals`, { proposals })
+
+export const addInstruction = (sessionId: string, instruction: string) =>
+  apiClient.post<{ success: boolean; instructions: string[] }>(`/discussions/${sessionId}/instruction`, { instruction })
+
+export const synthesize = (sessionId: string) =>
+  apiClient.post<SynthesizeResponse>(`/discussions/${sessionId}/synthesize`)
+
+export const resynthesize = (sessionId: string) =>
+  apiClient.post<{ success: boolean; status: DiscussionStatus }>(`/discussions/${sessionId}/resynthesize`)
+
+export const completeDiscussion = (sessionId: string) =>
+  apiClient.post<{ success: boolean; status: DiscussionStatus }>(`/discussions/${sessionId}/complete`)
+
+export const terminateDiscussion = (sessionId: string) =>
+  apiClient.post<{ success: boolean; status: DiscussionStatus }>(`/discussions/${sessionId}/terminate`)
+
+export const deleteDiscussionSession = (sessionId: string) =>
+  apiClient.delete<{ success: boolean }>(`/discussions/${sessionId}`)
+
+export const getAggregatedInteractions = (params: { source?: string; limit?: number; offset?: number; session_id?: string; project_id?: string } = {}) =>
+  apiClient.get<AggregatedInteractionResponse>('/interactions/aggregated', { params })
+
+// ============ 多 Agent 群聊（ChatSession） ============
+
+export type ChatSessionStatus = 'idle' | 'running' | 'synthesizing' | 'completed' | 'terminated'
+
+export interface ChatMember {
+  id: string
+  kind: 'agent' | 'author'
+  name: string
+  description: string
+  category: AgentRoleCategory
+  systemPrompt?: string
+}
+
+export interface ChatMessageRecord {
+  id: string
+  sessionId: string
+  memberId: string
+  memberName: string
+  kind: 'agent' | 'author' | 'system'
+  category?: AgentRoleCategory
+  content: string
+  timestamp: string
+  replyTo?: string
+}
+
+export type ChatSessionEvent =
+  | { type: 'system'; data: { message: string; status?: ChatSessionStatus; memberId?: string } }
+  | { type: 'chat_message'; data: ChatMessageRecord }
+  | { type: 'speaker'; data: { memberId: string; memberName: string; scores: Record<string, number>; reason: string } }
+  | { type: 'agent_status'; data: { memberId: string; status: 'thinking' | 'generating' | 'idle' } }
+  | { type: 'consensus'; data: { level: number; message: string; signals?: string[] } }
+  | { type: 'done'; data: { status: 'completed' | 'terminated'; summary?: string } }
+  | { type: 'error'; data: { error: string } }
+
+export interface ChatSessionSnapshot {
+  id: string
+  projectId: string
+  topic: string
+  members: ChatMember[]
+  messages: ChatMessageRecord[]
+  status: ChatSessionStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface StartChatSessionRequest {
+  projectId: string
+  topic: string
+  memberIds: string[]
+  staticContext?: Record<string, string>
+  maxRounds?: number
+}
+
+export const startChatSession = (data: StartChatSessionRequest) =>
+  apiClient.post<{ sessionId: string; status: ChatSessionStatus; members: ChatMember[]; topic: string }>('/chat-sessions/start', data)
+
+export const getChatSession = (sessionId: string) =>
+  apiClient.get<ChatSessionSnapshot>(`/chat-sessions/${sessionId}`)
+
+export const sendChatMessage = (sessionId: string, content: string) =>
+  apiClient.post<{ success: boolean; message: ChatMessageRecord }>(`/chat-sessions/${sessionId}/message`, { content })
+
+export const stopChatSession = (sessionId: string) =>
+  apiClient.post<{ success: boolean; status: ChatSessionStatus }>(`/chat-sessions/${sessionId}/stop`)
+
+export async function* chatSessionStream(sessionId: string): AsyncGenerator<ChatSessionEvent> {
+  const response = await fetch(`/api/chat-sessions/${sessionId}/stream`, {
+    headers: { Accept: 'text/event-stream' },
+  })
+  if (!response.ok || !response.body) {
+    throw new Error(`讨论流连接失败: HTTP ${response.status}`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let eventType = ''
+  const knownEvents = new Set(['system', 'chat_message', 'speaker', 'agent_status', 'consensus', 'done', 'error'])
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let boundary
+    while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, boundary)
+      buffer = buffer.slice(boundary + 2)
+      let data = ''
+      for (const line of rawEvent.split('\n')) {
+        if (line.startsWith('event:')) eventType = line.slice(6).trim()
+        if (line.startsWith('data:')) data += line.slice(5).trim()
+      }
+      if (!data || !knownEvents.has(eventType)) continue
+      try {
+        yield JSON.parse(data) as ChatSessionEvent
+      } catch {
+        // 忽略无法解析的帧
+      }
+    }
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

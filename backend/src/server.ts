@@ -1,4 +1,4 @@
-﻿/**
+/**
  * AI 小说工作站后端入口（TS，ADR-0006 / ADR-0005）。
  */
 import Fastify, { type FastifyInstance } from "fastify";
@@ -12,6 +12,9 @@ import { workflowRoutes } from "./api/routes/workflow.js";
 import { filesRoutes } from "./api/routes/files.js";
 import { interactionsRoutes } from "./api/routes/interactions.js";
 import { agentRoutes } from "./api/routes/agent.js";
+import { agentRolesRoutes } from "./api/routes/agent_roles.js";
+import { discussionRoutes } from "./api/routes/discussions.js";
+import { chatSessionsRoutes } from "./api/routes/chat_sessions.js";
 
 export interface BuildAppOptions {
   logger?: boolean;
@@ -46,6 +49,9 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(filesRoutes, { prefix: "/api/files" });
   await app.register(interactionsRoutes, { prefix: "/api/interactions" });
   await app.register(agentRoutes, { prefix: "/api/agent" });
+  await app.register(agentRolesRoutes, { prefix: "/api/agent-roles" });
+  await app.register(discussionRoutes, { prefix: "/api/discussions" });
+  await app.register(chatSessionsRoutes, { prefix: "/api/chat-sessions" });
 
   return app;
 }
@@ -56,4 +62,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   await app.listen({ port, host: "127.0.0.1" });
   console.log(`[ts-backend] listening on http://127.0.0.1:${port}`);
 }
+
+
+
+
 
