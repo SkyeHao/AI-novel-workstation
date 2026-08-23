@@ -88,7 +88,14 @@
       <aside class="member-panel">
         <div class="member-panel-title">成员（{{ members.length }}）</div>
         <div class="member-list">
-          <div v-for="m in members" :key="m.id" class="member-item" :class="{ 'member-speaking': speakingMemberId === m.id }">
+          <div
+            v-for="m in members"
+            :key="m.id"
+            class="member-item"
+            :class="{ 'member-speaking': speakingMemberId === m.id, 'member-clickable': m.kind === 'agent' }"
+            :title="m.kind === 'agent' ? '点击快速 @' + m.name : ''"
+            @click="quickMention(m)"
+          >
             <div class="member-avatar" :class="avatarClass(m)">
               {{ m.name.slice(0, 1) }}
             </div>
@@ -180,6 +187,7 @@
           </div>
           <div class="chat-input-actions">
             <span v-if="sending" class="sending-tip"><el-icon class="is-loading"><Loading /></el-icon> 发送中…</span>
+            <span v-if="isRunning" class="mention-tip">点击左侧成员可快速 @</span>
             <el-button type="primary" :disabled="!isRunning || !draft.trim()" :loading="sending" @click="sendAuthorMessage">
               <el-icon style="margin-right: 4px"><Promotion /></el-icon>
               发送
@@ -318,6 +326,16 @@ function memberStatusText(memberId: string): string {
   if (s === 'thinking') return '思考中…'
   if (s === 'generating') return '生成中…'
   return '在线'
+}
+
+/** 工单 03：点击成员快速 @ 该角色，插入到输入框。 */
+function quickMention(member: ChatMember) {
+  if (!isRunning.value) return
+  if (member.kind === 'author') return
+  const name = member.name
+  if (draft.value.includes('@' + name)) return
+  const prefix = draft.value.trim() ? draft.value.replace(/\s+$/, ' ') + ' ' : ''
+  draft.value = prefix + '@' + name + ' '
 }
 
 function formatTime(iso: string): string {
@@ -733,6 +751,10 @@ onBeforeUnmount(() => {
   background: var(--surface-hover);
 }
 
+.member-item.member-clickable {
+  cursor: pointer;
+}
+
 .member-item.member-speaking {
   background: var(--accent-soft);
   outline: 1px solid var(--accent-border);
@@ -965,6 +987,11 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 4px;
+  font-size: 12px;
+  color: var(--text-aux);
+}
+
+.mention-tip {
   font-size: 12px;
   color: var(--text-aux);
 }

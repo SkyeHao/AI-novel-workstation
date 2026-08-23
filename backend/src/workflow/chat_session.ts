@@ -161,8 +161,23 @@ export class ChatSession {
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
     this._scheduler.trackMessage(record.content);
+    // 工单 03：解析 @角色名 定向召唤，被 @ 者获得强意愿加成
+    const mentionedIds = this._resolveMentions(text);
+    for (const id of mentionedIds) {
+      this._scheduler.mention(id);
+    }
     this._emit({ type: "chat_message", data: record });
     return record;
+  }
+
+  /** 解析消息中的 @角色名，返回命中的 Agent 成员 id（定向召唤）。 */
+  private _resolveMentions(text: string): string[] {
+    const ids = new Set<string>();
+    for (const member of this.members) {
+      if (member.kind !== "agent") continue;
+      if (text.includes("@" + member.name)) ids.add(member.id);
+    }
+    return [...ids];
   }
 
   /** 手动终止：running → terminated，推送系统事件；不产出伪总结。 */

@@ -363,3 +363,69 @@ describe("SpeakerScheduler（工单 02 意愿度计算）", () => {
     expect(scheduler.forceHighest()).toBeTruthy();
   });
 });
+
+describe("ChatSession（工单 03：作者参与 + @ 召唤）", () => {
+  it("@ 召唤：作者 @ 某角色后，下一发言窗口归被 @ 者（无视冷却），得分含 mention=100", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-3",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 60000,
+      idleTimeoutMs: 200,
+      maxRounds: 3,
+      relevanceFn: () => 0,
+      onEvent: (e) => events.push(e),
+    });
+
+    const p = session.start();
+    // 等 r1、r2 各发言一次，二者均进入 60s 冷却
+    await vi.waitFor(() =>
+      expect(events.filter((e) => e.type === "chat_message" && e.data.kind === "agent").length).toBe(2)
+    );
+    // 作者 @ 情感锚点(r2)：下一步应归 r2（无 @ 时 tie-break 会是 r1）
+    await session.sendUserMessage("@情感锚点 请从人物动机角度补充");
+    await p;
+
+    const speakers = events.filter((e) => e.type === "speaker").map((e) => e.data.memberId);
+    expect(speakers).toEqual(["r1", "r2", "r2"]);
+    const third = events.filter((e) => e.type === "speaker")[2]!.data;
+    expect(third.memberId).toBe("r2");
+    expect(third.scores.mention).toBe(100);
+  });
+
+  it("作者消息计入上下文：后续 Agent 发言 replyTo 指向作者消息", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    fake.hold();
+    const session = new ChatSession({
+      projectId: "proj-3",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 60000,
+      idleTimeoutMs: 200,
+      maxRounds: 2,
+      onEvent: (e) => events.push(e),
+    });
+
+    const p = session.start();
+    await vi.waitFor(() => expect(fake.calls.length).toBe(1));
+    const authorMsg = await session.sendUserMessage("作者说：请注意设定一致性");
+    fake.release();
+    await p;
+
+    const agentMsgs = events.filter(
+      (e) => e.type === "chat_message" && e.data.kind === "agent"
+    ) as Array<{ type: "chat_message"; data: ChatMessageRecord }>;
+    expect(agentMsgs.length).toBe(2);
+    // 第一条 Agent 发言承接作者消息
+    expect(agentMsgs[0]!.data.replyTo).toBe(authorMsg.id);
+  });
+});
