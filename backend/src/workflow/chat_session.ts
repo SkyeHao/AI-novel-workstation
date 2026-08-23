@@ -11,6 +11,8 @@ import type { LLMClient } from "../llm/client.js";
 import type { AgentRoleCategory } from "../assets/agent_roles.js";
 import { SpeakerScheduler, type WillingnessBreakdown } from "./speaker_scheduler.js";
 import type { SpeakerSchedulerOptions } from "./speaker_scheduler.js";
+import { ConsensusDetector, stripSelfRating } from "./consensus_detector.js";
+import type { ConsensusDetectorOptions } from "./consensus_detector.js";
 
 export type ChatSessionStatus = "idle" | "running" | "synthesizing" | "completed" | "terminated";
 
@@ -69,6 +71,8 @@ export interface ChatSessionConfig {
   random?: () => number;
   /** 话题相关性打分函数（默认关键词降级；工单 06 注入 Embedding 服务） */
   relevanceFn?: SpeakerSchedulerOptions["relevanceFn"];
+  /** 共识检测配置（工单 04：阈值 / 连续轮数 / 收敛判定可注入；工单 06 注入向量聚类） */
+  consensus?: ConsensusDetectorOptions;
   onEvent?: (event: ChatSessionEvent) => void;
 }
 
@@ -94,6 +98,9 @@ export class ChatSession {
   private _updatedAt: string;
   private _nowFn: () => number;
   private _scheduler: SpeakerScheduler;
+  private _detector: ConsensusDetector;
+  /** 是否已推送过「接近共识」预警（防止重复） */
+  private _consensusWarned = false;
 
   constructor(config: ChatSessionConfig) {
     this.id = config.id ?? randomUUID();
@@ -112,6 +119,7 @@ export class ChatSession {
       random: config.random,
       relevanceFn: config.relevanceFn,
     });
+    this._detector = new ConsensusDetector(config.consensus);
     this.createdAt = new Date().toISOString();
     this._updatedAt = this.createdAt;
     if (config.onEvent) this.subscribe(config.onEvent);
@@ -264,6 +272,11 @@ export class ChatSession {
         await this._runAgentTurn(speaker);
         this._scheduler.recordTurn(speaker.id);
         turns += 1;
+        // 工单 04：连续多轮超阈值 → 由合成者产出结构化总结并结束
+        if (this._detector.shouldSynthesize) {
+          const synthesized = await this._runSynthesisIfPossible();
+          if (synthesized) break;
+        }
       }
       if (this._status === "running") {
         this._status = "completed";
@@ -274,7 +287,11 @@ export class ChatSession {
       // 异常统一收敛为 error 事件；状态进入 terminated（对应设计文档「作者手动终止 / 异常」）
       this._status = "terminated";
       this._updatedAt = new Date().toISOString();
-      this._emit({ type: "error", data: { error: err instanceof Error ? err.message : String(err) } });
+      const message = err instanceof Error ? err.message : String(err);
+      // 手动终止触发的中止（abort）不算运行错误，不推送 error 事件
+      if (!/abort|终止/i.test(message)) {
+        this._emit({ type: "error", data: { error: message } });
+      }
     }
   }
 
@@ -333,7 +350,13 @@ export class ChatSession {
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "thinking" } });
     const messages = [
       new ChatMessage(Role.SYSTEM, member.systemPrompt || "你是一位剧情讨论顾问。", undefined, member.name),
-      new ChatMessage(Role.USER, "讨论主题：" + this.topic + "\n\n请作为「" + member.name + "」发言。"),
+      new ChatMessage(
+        Role.USER,
+        "讨论主题：" + this.topic +
+          "\n\n请作为「" + member.name + "」发言，承接最近的讨论并发表你的观点。" +
+          "\n\n发言要求：请在结尾单独一行输出你的共识自评，格式：【共识度：0~1】。" +
+          "0 表示完全不认同当前讨论方向，1 表示完全达成一致。"
+      ),
     ];
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "generating" } });
     const resp = await this._llm.achat(messages, {}, this._abort?.signal);
@@ -349,10 +372,69 @@ export class ChatSession {
       timestamp: new Date().toISOString(),
       replyTo: this._messages.length > 0 ? this._messages[this._messages.length - 1]!.id : undefined,
     };
+    // 工单 04：先用原文（含自评行）做共识检测，再剥离自评行上屏
+    const evalResult = this._detector.evaluate(record);
+    if (evalResult.warned && !evalResult.triggered && !this._consensusWarned) {
+      this._consensusWarned = true;
+      this._emit({
+        type: "consensus",
+        data: { level: evalResult.level, message: "讨论接近共识，可补充意见后即将收束", signals: evalResult.signals },
+      });
+    }
+    record.content = stripSelfRating(resp.content);
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
     this._scheduler.trackMessage(record.content);
     this._emit({ type: "chat_message", data: record });
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "idle" } });
+  }
+
+  /**
+   * 工单 04：达成共识后的合成阶段。
+   * 由「合成者」成员基于讨论记录产出结构化总结（核心共识 / 主要分歧 / 综合方案 / 行动建议），
+   * 随后会话进入 completed 并推送带 summary 的 done 事件。
+   * 无合成者成员时不触发合成，重置检测器让讨论继续。
+   * @returns 是否已触发合成并结束会话
+   */
+  private async _runSynthesisIfPossible(): Promise<boolean> {
+    const synthesizer = this.members.find((m) => m.kind === "agent" && m.category === "synthesizer");
+    if (!synthesizer) {
+      this._detector.reset();
+      this._emit({ type: "system", data: { message: "接近共识，但当前没有合成者成员，讨论继续" } });
+      return false;
+    }
+    this._status = "synthesizing";
+    this._updatedAt = new Date().toISOString();
+    this._emit({
+      type: "system",
+      data: { message: "已达成共识，合成者「" + synthesizer.name + "」正在整理最终方案", status: this._status, memberId: synthesizer.id },
+    });
+    this._emit({ type: "consensus", data: { level: 1, message: "已达成共识，开始合成最终方案" } });
+    this._emit({ type: "agent_status", data: { memberId: synthesizer.id, status: "thinking" } });
+
+    const recent = this._messages
+      .slice(-12)
+      .map((m) => "「" + m.memberName + "」：" + m.content)
+      .join("\n");
+    const summaryMessages = [
+      new ChatMessage(Role.SYSTEM, synthesizer.systemPrompt || "你是剧情讨论的合成者。", undefined, synthesizer.name),
+      new ChatMessage(
+        Role.USER,
+        "讨论主题：" + this.topic +
+          "\n\n请基于以下讨论记录，输出结构化最终方案，包含四部分：核心共识、主要分歧、综合方案、行动建议。" +
+          "\n\n讨论记录：\n" + (recent || "（暂无记录）")
+      ),
+    ];
+    this._emit({ type: "agent_status", data: { memberId: synthesizer.id, status: "generating" } });
+    const resp = await this._llm.achat(summaryMessages, {}, this._abort?.signal);
+    if (this._status !== "synthesizing") return true; // 生成期间被作者终止
+    const summary = resp.content ?? "";
+
+    this._status = "completed";
+    this._updatedAt = new Date().toISOString();
+    this._emit({ type: "agent_status", data: { memberId: synthesizer.id, status: "idle" } });
+    this._emit({ type: "consensus", data: { level: 1, message: "合成者产出最终方案：\n" + summary } });
+    this._emit({ type: "done", data: { status: "completed", summary } });
+    return true;
   }
 }
