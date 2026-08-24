@@ -32,6 +32,16 @@
             <div class="session-item-top">
               <span class="session-item-topic" :title="s.topic">{{ s.topic }}</span>
               <el-tag :type="statusTagTypeFor(s.status)" size="small" effect="plain">{{ statusLabelFor(s.status) }}</el-tag>
+              <el-button
+                class="session-delete-btn"
+                size="small"
+                text
+                type="danger"
+                title="删除会话"
+                @click.stop="deleteSession(s)"
+              >
+                <el-icon><Delete /></el-icon>
+              </el-button>
             </div>
             <div class="session-item-meta">
               <span>{{ s.messages.length }} 条消息</span>
@@ -288,7 +298,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import {
@@ -301,6 +311,7 @@ import {
   startChatSession,
   sendChatMessage,
   stopChatSession,
+  deleteChatSession,
   applyChatPlan,
   chatSessionStream,
   type AgentRoleAsset,
@@ -807,6 +818,33 @@ function closeStream() {
   if (streamController) {
     streamController.abort()
     streamController = null
+  }
+}
+
+/** 删除会话：二次确认 → 关闭当前流 → 后端彻底删除 → 刷新列表。 */
+async function deleteSession(s: ChatSessionSnapshot) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除讨论会话「${s.topic}」吗？删除后内存与磁盘记录将一并清除，且不可恢复。`,
+      '删除会话',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch {
+    return // 用户取消
+  }
+  const isCurrent = s.id === sessionId.value
+  if (isCurrent) closeStream()
+  try {
+    await deleteChatSession(s.id)
+    if (isCurrent) {
+      goNewChat() // 回到配置页并清除本地状态
+    } else {
+      await loadSessions()
+    }
+    ElMessage.success('会话已删除')
+  } catch (err: any) {
+    console.error('删除讨论会话失败:', err)
+    ElMessage.error((err?.response?.data?.error as string) || '删除会话失败')
   }
 }
 
@@ -1420,5 +1458,10 @@ onBeforeUnmount(() => {
 .mention-tip {
   font-size: 12px;
   color: var(--text-aux);
+}
+.session-delete-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 4px;
 }
 </style>

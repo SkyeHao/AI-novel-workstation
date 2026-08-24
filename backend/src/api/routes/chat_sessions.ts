@@ -178,6 +178,29 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
     return { success: true, status: session.getStatus() };
   });
 
+  // ---- 删除会话（内存 + 磁盘彻底移除） ----
+  app.delete<{ Params: { id: string } }>("/:id", async (req, reply) => {
+    const sessionId = req.params.id;
+    const session = _sessions.get(sessionId);
+    if (session) {
+      // 中止调度 + 停止落盘，避免异步收尾把已删除会话重新写回磁盘
+      session.dispose();
+      _sessions.delete(sessionId);
+    }
+    // 磁盘删除：跨项目查找（与 loadFromDisk 一致）
+    let deleted = false;
+    for (const project of getProjectStore().list()) {
+      if (getChatStore().delete(project.id, sessionId)) {
+        deleted = true;
+        break;
+      }
+    }
+    if (!deleted && !session) {
+      return reply.code(404).send({ error: "讨论会话不存在" });
+    }
+    return { success: true };
+  });
+
   // ---- 应用最终方案（工单 08）：保存文档 / 应用大纲 / 应用人设 ----
   app.post<{ Params: { id: string }; Body: { target?: string } }>("/:id/apply", async (req, reply) => {
     const session = _sessions.get(req.params.id);

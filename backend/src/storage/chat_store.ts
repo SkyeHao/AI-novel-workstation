@@ -40,6 +40,8 @@ export interface ChatStore {
   load(projectId: string, sessionId: string): ChatSessionSnapshot | null;
   /** 项目内会话列表（按 updatedAt 倒序）。 */
   list(projectId: string): ChatSessionSnapshot[];
+  /** 删除会话（过程记录 + 共识/成果），返回是否存在过程记录文件。 */
+  delete(projectId: string, sessionId: string): boolean;
 }
 
 interface ConsensusFile {
@@ -174,5 +176,21 @@ export class FileChatStore implements ChatStore {
     }
     out.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     return out;
+  }
+
+  delete(projectId: string, sessionId: string): boolean {
+    const record = this._recordFile(projectId, sessionId);
+    let existed = false;
+    try {
+      if (fs.existsSync(record)) {
+        fs.rmSync(record, { force: true });
+        existed = true;
+      }
+      const consensus = this._consensusFile(projectId, sessionId);
+      if (fs.existsSync(consensus)) fs.rmSync(consensus, { force: true });
+    } catch (err) {
+      console.warn("删除讨论记录失败: " + String(err));
+    }
+    return existed;
   }
 }

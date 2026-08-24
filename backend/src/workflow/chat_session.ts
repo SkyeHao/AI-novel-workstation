@@ -310,6 +310,16 @@ export class ChatSession {
     this._emit({ type: "system", data: { message: "讨论已被作者终止", status: this._status } });
   }
 
+  /**
+   * 销毁会话（删除场景）：中止调度并停止一切落盘。
+   * 将 _chatStore 置空后，异步收尾里的 save / appendMessage 全部变为 no-op，
+   * 避免被删除的会话在磁盘上“复活”。会话从此不可再用。
+   */
+  dispose(): void {
+    this._chatStore = null;
+    this._abort?.abort();
+  }
+
   // ------------------------------------------------------------------
   // 查询（供路由 / 前端 / 测试断言）
   // ------------------------------------------------------------------

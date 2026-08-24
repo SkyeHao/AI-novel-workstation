@@ -1014,6 +1014,10 @@ export const sendChatMessage = (sessionId: string, content: string) =>
 export const stopChatSession = (sessionId: string) =>
   apiClient.post<{ success: boolean; status: ChatSessionStatus }>(`/chat-sessions/${sessionId}/stop`)
 
+// 删除讨论会话（内存 + 磁盘彻底移除）。
+export const deleteChatSession = (sessionId: string) =>
+  apiClient.delete<{ success: boolean }>(`/chat-sessions/${sessionId}`)
+
 export type ChatApplyTarget = 'document' | 'outline' | 'characters'
 
 export const applyChatPlan = (sessionId: string, target: ChatApplyTarget) =>
