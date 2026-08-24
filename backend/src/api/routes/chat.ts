@@ -16,7 +16,14 @@ function toMessages(messages: MsgIn[] | undefined): ChatMessage[] {
 
 export async function chatRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: { task?: string; messages?: MsgIn[]; temperature?: number | null; max_tokens?: number | null } }>("/", async (req, reply) => {
-    const logger = new InteractionLogger();
+    const logger = new InteractionLogger((it) => {
+      try {
+        // source=chat_test：与群聊（chat: 前缀）区分，归入单 Agent 渠道（工单 09）
+        saveInteraction("chat_test", it, { task_type: req.body?.task ?? "text" });
+      } catch (err) {
+        console.warn(`保存交互记录失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
     let client;
     try {
       client = getClientForTask((req.body?.task as "text" | "structure" | "check") ?? "text", logger);
@@ -42,11 +49,6 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     if (interactions.length > 0) {
       const it = interactions[interactions.length - 1]!;
       interactionOut = { ...it };
-      try {
-        saveInteraction("chat", it, { task_type: req.body?.task ?? "text" });
-      } catch (err) {
-        console.warn(`保存交互记录失败: ${err}`);
-      }
     }
 
     return {

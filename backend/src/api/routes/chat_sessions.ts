@@ -13,7 +13,7 @@ import {
 import { getAgentRole } from "../../assets/agent_roles.js";
 import { getClientForTask, getProjectStore } from "../state.js";
 import { InteractionLogger } from "../../llm/interaction_logger.js";
-import { saveInteraction } from "../../storage/interaction_store.js";
+import { saveInteraction, deleteBySession } from "../../storage/interaction_store.js";
 import { TransformersEmbeddingService, type EmbeddingService } from "../../vector/embedding.js";
 import { QdrantVectorStore, type VectorStore } from "../../vector/store.js";
 import { FileChatStore } from "../../storage/chat_store.js";
@@ -101,17 +101,22 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const sessionId = randomUUID();
+    // 工单 09：通过会话事件追踪「当前发言成员」，让群聊 LLM 调用记录标注到具体成员
+    let speaking: { memberId: string; memberName: string } | null = null;
     let client;
     try {
       const logger = new InteractionLogger((it) => {
         try {
           saveInteraction("chat", it, {
             task_type: "text",
-            session_id: `chat:${sessionId}`,
+            session_id: "chat:" + sessionId,
             project_id: projectId,
+            channel: "group_chat",
+            member_id: speaking?.memberId ?? "",
+            member_name: speaking?.memberName ?? "",
           });
         } catch (err) {
-          console.warn(`保存群聊交互记录失败: ${err instanceof Error ? err.message : String(err)}`);
+          console.warn("保存群聊交互记录失败: " + (err instanceof Error ? err.message : String(err)));
         }
       });
       client = getClientForTask("text", logger);
@@ -131,6 +136,21 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
       chatStore: getChatStore(),
       // 工单 06：注入本地 Embedding + Qdrant；不可用时降级，不阻断
       vector: getVectorBundle() ? { embedding: _vectorBundle!.embedding, store: _vectorBundle!.store } : undefined,
+    });
+    // 工单 09：通过会话事件追踪「当前发言成员」，让群聊 LLM 调用记录标注到具体成员
+    const memberNameById = new Map(members.map((m) => [m.id, m.name]));
+    session.subscribe((event) => {
+      if (event.type === "speaker") {
+        speaking = { memberId: event.data.memberId, memberName: event.data.memberName };
+      } else if (event.type === "agent_status") {
+        if (event.data.status === "generating") {
+          speaking = { memberId: event.data.memberId, memberName: memberNameById.get(event.data.memberId) ?? "" };
+        } else if (event.data.status === "idle") {
+          speaking = null;
+        }
+      } else if (event.type === "chat_message" || event.type === "done" || event.type === "error") {
+        speaking = null;
+      }
     });
     _sessions.set(sessionId, session);
     // 会话创建后停在 idle：由作者第一条消息激活，标题仅作会话名
@@ -198,6 +218,8 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
     if (!deleted && !session) {
       return reply.code(404).send({ error: "讨论会话不存在" });
     }
+    // 工单 09：级联清除该会话在 interactions.jsonl 中的全部 LLM 调用记录
+    deleteBySession("chat:" + sessionId);
     return { success: true };
   });
 
@@ -222,6 +244,8 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
             task_type: "text",
             session_id: "chat:" + snapshot.id,
             project_id: snapshot.projectId,
+            channel: "group_chat",
+            member_name: "方案应用",
           });
         } catch (err) {
           console.warn("保存群聊应用交互记录失败: " + (err instanceof Error ? err.message : String(err)));

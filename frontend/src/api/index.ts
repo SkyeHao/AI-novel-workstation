@@ -853,7 +853,7 @@ export const updateSearchConfig = (data: SearchConfigUpdate) => apiClient.put<Se
 
 // ============ 交互记录 ============
 
-export type InteractionSource = 'chat' | 'stage1' | 'agent'
+export type InteractionSource = 'chat' | 'chat_test' | 'chat_apply' | 'stage1' | 'agent'
 
 export interface InteractionListItem {
   id: string
@@ -870,6 +870,9 @@ export interface InteractionListItem {
   session_id: string
   turn_id: string
   user_message: string
+  channel?: 'agent' | 'group_chat'
+  member_id?: string
+  member_name?: string
   response_content: string
   tool_result: string
   tool_name: string
@@ -888,6 +891,7 @@ export interface AggregatedInteraction {
   user_message: string
   project_id: string
   session_id: string
+  channel?: 'agent' | 'group_chat'
   session_title: string
   timestamp: string
   total_tokens: number
@@ -912,6 +916,9 @@ export interface InteractionDetail extends LLMInteraction {
   session_id: string
   turn_id: string
   user_message: string
+  channel?: 'agent' | 'group_chat'
+  member_id?: string
+  member_name?: string
 }
 
 export interface DeleteResult {
@@ -940,7 +947,7 @@ export const deleteAgentRole = (id: string) => apiClient.delete<{ success: boole
 export const duplicateAgentRole = (id: string) => apiClient.post<AgentRoleAsset>(`/agent-roles/${id}/duplicate`)
 
 
-export const getAggregatedInteractions = (params: { source?: string; limit?: number; offset?: number; session_id?: string; project_id?: string } = {}) =>
+export const getAggregatedInteractions = (params: { source?: string; limit?: number; offset?: number; session_id?: string; project_id?: string; channel?: 'agent' | 'group_chat' } = {}) =>
   apiClient.get<AggregatedInteractionResponse>('/interactions/aggregated', { params })
 
 // ============ 多 Agent 群聊（ChatSession） ============
@@ -988,6 +995,13 @@ export interface ChatSessionSnapshot {
   createdAt: string
   updatedAt: string
   summary?: string
+  consensusNodes?: ChatConsensusNode[]
+}
+
+export interface ChatConsensusNode {
+  level: number
+  message: string
+  signals?: string[]
 }
 
 export interface StartChatSessionRequest {

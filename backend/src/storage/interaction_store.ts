@@ -35,9 +35,16 @@ export interface StoredInteraction {
   tool_result: string;
   tool_success: boolean;
   created_at: string;
+  project_id: string;
   session_id: string;
   turn_id: string;
   user_message: string;
+  /** 记录渠道：agent=单 Agent 创造；group_chat=多 Agent 群聊（工单 09） */
+  channel?: "agent" | "group_chat";
+  /** 群聊记录：发言成员 id（工单 09） */
+  member_id?: string;
+  /** 群聊记录：发言成员名（工单 09） */
+  member_name?: string;
 }
 
 function nowSeconds(): string {
@@ -77,11 +84,21 @@ function extractTitle(interaction: Record<string, unknown>): string {
   return clean.length > 40 ? clean.slice(0, 40) + "…" : clean;
 }
 
+/** 推导记录渠道：新数据读 channel 字段；旧数据按 source + session_id 前缀判定，无需迁移（工单 09）。 */
+function deriveChannel(r: Pick<StoredInteraction, "channel" | "source" | "session_id">): "agent" | "group_chat" {
+  if (r.channel === "agent" || r.channel === "group_chat") return r.channel;
+  if (r.source === "chat" || r.source === "chat_apply") {
+    return (r.session_id ?? "").startsWith("chat:") ? "group_chat" : "agent";
+  }
+  return "agent";
+}
+
 export function saveInteraction(
   source: string,
   interaction: Record<string, unknown> | import("../llm/interaction_logger.js").LLMInteraction,
-  opts: { title?: string; task_type?: string; session_id?: string; turn_id?: string; user_message?: string } = {}
+  opts: { title?: string; task_type?: string; session_id?: string; turn_id?: string; user_message?: string; project_id?: string; channel?: "agent" | "group_chat"; member_id?: string; member_name?: string } = {}
 ): StoredInteraction {
+  const sessionId = opts.session_id ?? "";
   const rec: StoredInteraction = {
     id: randomUUID(),
     source,
@@ -107,22 +124,37 @@ export function saveInteraction(
     tool_result: String(interaction.tool_result ?? ""),
     tool_success: interaction.tool_success !== false,
     created_at: nowSeconds(),
+    project_id: opts.project_id ?? "",
     session_id: opts.session_id ?? "",
     turn_id: opts.turn_id ?? "",
     user_message: opts.user_message ?? "",
+    channel: opts.channel ?? deriveChannel({ channel: undefined, source, session_id: sessionId }),
+    member_id: opts.member_id ?? "",
+    member_name: opts.member_name ?? "",
   };
-  const records = readAll();
-  records.push(rec);
-  writeAll(records);
+  ensureDir();
+  // 追加写入前确保文件以换行结尾，避免粘行破坏 JSONL
+  if (fs.existsSync(DB_PATH)) {
+    const st = fs.statSync(DB_PATH);
+    if (st.size > 0) {
+      const fd = fs.openSync(DB_PATH, "r");
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, st.size - 1);
+      fs.closeSync(fd);
+      if (last[0] !== 0x0a) fs.appendFileSync(DB_PATH, "\n", "utf-8");
+    }
+  }
+  fs.appendFileSync(DB_PATH, JSON.stringify(rec) + "\n", "utf-8");
   return rec;
 }
 
-export function listInteractions(opts: { source?: string; limit?: number; offset?: number; session_id?: string } = {}): { items: StoredInteraction[]; total: number; limit: number; offset: number } {
+export function listInteractions(opts: { source?: string; limit?: number; offset?: number; session_id?: string; channel?: "agent" | "group_chat" } = {}): { items: StoredInteraction[]; total: number; limit: number; offset: number } {
   const limit = opts.limit ?? 20;
   const offset = opts.offset ?? 0;
   let records = readAll();
   if (opts.source) records = records.filter((r) => r.source === opts.source);
   if (opts.session_id) records = records.filter((r) => r.session_id === opts.session_id);
+  if (opts.channel) records = records.filter((r) => deriveChannel(r) === opts.channel);
   records.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
   return { items: records.slice(offset, offset + limit), total: records.length, limit, offset };
 }
@@ -156,4 +188,82 @@ export function clearAllInteractions(source?: string): number {
   return removed;
 }
 
+/** 聚合后的交互记录（一次用户消息 + 所有相关LLM调用） */
+export interface AggregatedInteraction {
+  turn_id: string;
+  user_message: string;
+  project_id: string;
+  session_id: string;
+  /** 记录渠道：agent=单 Agent 创造；group_chat=群聊（工单 09） */
+  channel: "agent" | "group_chat";
+  /** 会话标题（由调用方通过 sessionTitleResolver 注入，避免前端二次拉取） */
+  session_title: string;
+  timestamp: string;
+  total_tokens: number;
+  total_elapsed_ms: number;
+  has_error: boolean;
+  records: StoredInteraction[];
+}
 
+/** 按 turn_id 聚合交互记录 */
+export function aggregateInteractions(opts: {
+  source?: string;
+  limit?: number;
+  offset?: number;
+  session_id?: string;
+  project_id?: string;
+  channel?: "agent" | "group_chat";
+  /** 会话标题解析器：(projectId, sessionId) => 标题 | null */
+  sessionTitleResolver?: (projectId: string, sessionId: string) => string | null;
+} = {}): {
+  items: AggregatedInteraction[];
+  total: number;
+  limit: number;
+  offset: number;
+} {
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  let records = readAll();
+  
+  if (opts.source) records = records.filter((r) => r.source === opts.source);
+  if (opts.session_id) records = records.filter((r) => r.session_id === opts.session_id);
+  if (opts.project_id) records = records.filter((r) => r.project_id === opts.project_id);
+  if (opts.channel) records = records.filter((r) => deriveChannel(r) === opts.channel);
+  
+  // 按 turn_id 分组
+  const turnMap = new Map<string, StoredInteraction[]>();
+  for (const r of records) {
+    const key = r.turn_id || r.id; // 兼容旧数据（无 turn_id）
+    if (!turnMap.has(key)) turnMap.set(key, []);
+    turnMap.get(key)!.push(r);
+  }
+  
+  // 聚合每个 turn
+  const aggregated: AggregatedInteraction[] = [];
+  for (const [turnId, recs] of turnMap) {
+    const first = recs[0];
+    aggregated.push({
+      turn_id: turnId,
+      user_message: first.user_message || '',
+      project_id: first.project_id,
+      session_id: first.session_id,
+      channel: deriveChannel(first),
+      session_title: opts.sessionTitleResolver?.(first.project_id, first.session_id) ?? '',
+      timestamp: first.created_at,
+      total_tokens: recs.reduce((sum, r) => sum + r.total_tokens, 0),
+      total_elapsed_ms: recs.reduce((sum, r) => sum + r.elapsed_ms, 0),
+      has_error: recs.some(r => !!r.error),
+      records: recs,
+    });
+  }
+  
+  // 按时间倒序
+  aggregated.sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+  
+  return {
+    items: aggregated.slice(offset, offset + limit),
+    total: aggregated.length,
+    limit,
+    offset,
+  };
+}

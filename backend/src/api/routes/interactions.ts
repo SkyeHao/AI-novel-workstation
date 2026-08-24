@@ -1,16 +1,50 @@
-﻿/** 交互记录路由（TS 版，迁移自 api/routes/interactions.py）。 */
+/** 交互记录路由（TS 版，迁移自 api/routes/interactions.py）。 */
 import type { FastifyInstance } from "fastify";
-import { listInteractions, getInteraction, deleteInteraction, deleteBySession, clearAllInteractions } from "../../storage/interaction_store.js";
+import { listInteractions, getInteraction, deleteInteraction, deleteBySession, clearAllInteractions, aggregateInteractions } from "../../storage/interaction_store.js";
+import { AgentSessionStore } from "../../storage/agent_session_store.js";
+import { getProjectStore } from "../state.js";
 
 export async function interactionsRoutes(app: FastifyInstance): Promise<void> {
-  app.get<{ Querystring: { source?: string; limit?: string; offset?: string; session_id?: string } }>("/", async (req) => {
+  app.get<{ Querystring: { source?: string; limit?: string; offset?: string; session_id?: string; channel?: string } }>("/", async (req) => {
     const limit = Number(req.query.limit ?? 20);
     const offset = Number(req.query.offset ?? 0);
     return listInteractions({
       source: req.query.source || undefined,
       session_id: req.query.session_id || undefined,
+      channel: (req.query.channel as "agent" | "group_chat" | undefined) || undefined,
       limit,
       offset,
+    });
+  });
+
+  // 聚合接口：按 turn_id 聚合交互记录
+  app.get<{ Querystring: { source?: string; limit?: string; offset?: string; session_id?: string; project_id?: string; channel?: string } }>("/aggregated", async (req) => {
+    const limit = Number(req.query.limit ?? 50);
+    const offset = Number(req.query.offset ?? 0);
+    const sStore = new AgentSessionStore(getProjectStore());
+    const titleCache = new Map<string, string>();
+    const sessionTitleResolver = (projectId: string, sessionId: string): string => {
+      if (!sessionId) return "";
+      const key = projectId + "::" + sessionId;
+      const cached = titleCache.get(key);
+      if (cached !== undefined) return cached;
+      let title = "";
+      try {
+        title = sStore.get(projectId, sessionId)?.title ?? "";
+      } catch {
+        title = "";
+      }
+      titleCache.set(key, title);
+      return title;
+    };
+    return aggregateInteractions({
+      source: req.query.source || undefined,
+      session_id: req.query.session_id || undefined,
+      project_id: req.query.project_id || undefined,
+      channel: (req.query.channel as "agent" | "group_chat" | undefined) || undefined,
+      limit,
+      offset,
+      sessionTitleResolver,
     });
   });
 
