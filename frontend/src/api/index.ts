@@ -971,6 +971,7 @@ export interface ChatMessageRecord {
 export type ChatSessionEvent =
   | { type: 'system'; data: { message: string; status?: ChatSessionStatus; memberId?: string } }
   | { type: 'chat_message'; data: ChatMessageRecord }
+  | { type: 'delta'; data: { messageId: string; memberId: string; memberName: string; content: string; done?: boolean } }
   | { type: 'speaker'; data: { memberId: string; memberName: string; scores: Record<string, number>; reason: string } }
   | { type: 'agent_status'; data: { memberId: string; status: 'thinking' | 'generating' | 'idle' } }
   | { type: 'consensus'; data: { level: number; message: string; signals?: string[] } }
@@ -1000,6 +1001,10 @@ export interface StartChatSessionRequest {
 export const startChatSession = (data: StartChatSessionRequest) =>
   apiClient.post<{ sessionId: string; status: ChatSessionStatus; members: ChatMember[]; topic: string }>('/chat-sessions/start', data)
 
+// 项目内讨论会话列表（含共识 / 最终方案，会话恢复入口）。
+export const listChatSessions = (projectId: string) =>
+  apiClient.get<{ sessions: ChatSessionSnapshot[] }>('/chat-sessions', { params: { projectId } })
+
 export const getChatSession = (sessionId: string) =>
   apiClient.get<ChatSessionSnapshot>(`/chat-sessions/${sessionId}`)
 
@@ -1025,7 +1030,7 @@ export async function* chatSessionStream(sessionId: string): AsyncGenerator<Chat
   const decoder = new TextDecoder()
   let buffer = ''
   let eventType = ''
-  const knownEvents = new Set(['system', 'chat_message', 'speaker', 'agent_status', 'consensus', 'done', 'error'])
+  const knownEvents = new Set(['system', 'chat_message', 'delta', 'speaker', 'agent_status', 'consensus', 'done', 'error'])
   while (true) {
     const { value, done } = await reader.read()
     if (done) break

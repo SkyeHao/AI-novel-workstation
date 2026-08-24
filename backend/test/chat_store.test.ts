@@ -167,6 +167,22 @@ class FakeLLMClient {
     const content = this.replies.length > 0 ? this.replies.shift()! : "这是「" + name + "」的发言";
     return { content, model: "fake" };
   }
+
+  async *astream(
+    messages: Array<{ role: string; content?: string; name?: string | null }>,
+    _kwargs?: Record<string, unknown>,
+    onDelta?: (delta: { content?: string | null }) => void,
+    signal?: AbortSignal
+  ): AsyncGenerator<string> {
+    const name = (messages[0] as { name?: string | null } | undefined)?.name ?? "角色";
+    this.calls.push({ content: name });
+    const content = this.replies.length > 0 ? this.replies.shift()! : "这是「" + name + "」的发言";
+    for (const ch of content) {
+      if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+      if (onDelta) onDelta({ content: ch });
+      yield ch;
+    }
+  }
   close(): void {}
 }
 

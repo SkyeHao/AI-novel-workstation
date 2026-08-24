@@ -71,6 +71,7 @@ export interface ChatSessionSnapshot {
 export type ChatSessionEvent =
   | { type: "system"; data: { message: string; status?: ChatSessionStatus; memberId?: string } }
   | { type: "chat_message"; data: ChatMessageRecord }
+  | { type: "delta"; data: { messageId: string; memberId: string; memberName: string; content: string; done?: boolean } }
   | {
       type: "speaker";
       data: { memberId: string; memberName: string; scores: Record<string, number>; reason: string };
@@ -492,23 +493,41 @@ export class ChatSession {
       new ChatMessage(Role.USER, assembled.userPrompt),
     ];
     this._emit({ type: "agent_status", data: { memberId: member.id, status: "generating" } });
-    const resp = await this._llm.achat(messages, {}, this._abort?.signal);
+    // 工单 09：流式输出。messageId 提前生成；delta 事件携带「累计」内容，
+    // 断线重连后前端拿到任一条 delta 即可完整还原，天然抗丢帧。
+    const messageId = randomUUID();
+    let streamed = "";
+    let lastDeltaAt = 0;
+    const emitDelta = (done: boolean): void => {
+      const now = Date.now();
+      if (!done && now - lastDeltaAt < 30) return; // 节流：至少 30ms 一帧，避免帧过密
+      lastDeltaAt = now;
+      this._emit({
+        type: "delta",
+        data: { messageId, memberId: member.id, memberName: member.name, content: streamed, done },
+      });
+    };
+    for await (const chunk of this._llm.astream(messages, {}, undefined, this._abort?.signal)) {
+      streamed += chunk;
+      emitDelta(false);
+    }
     if (this._status !== "running") return;
+    emitDelta(true);
     const record: ChatMessageRecord = {
-      id: randomUUID(),
+      id: messageId,
       sessionId: this.id,
       memberId: member.id,
       memberName: member.name,
       kind: "agent",
       category: member.category,
-      content: resp.content,
+      content: streamed,
       timestamp: new Date().toISOString(),
       replyTo: this._messages.length > 0 ? this._messages[this._messages.length - 1]!.id : undefined,
     };
     // 工单 06：向量化本条发言（供共识收敛聚类 + 话题相关性），失败静默；
     // 必须在 evaluate 之前完成，保证收敛判定能看到本条发言的向量
     if (this._vectorContext) {
-      await this._vectorContext.trackText(record.id, stripSelfRating(resp.content));
+      await this._vectorContext.trackText(record.id, stripSelfRating(streamed));
     }
     // 工单 04：先用原文（含自评行）做共识检测，再剥离自评行上屏
     const evalResult = this._detector.evaluate(record);
@@ -519,7 +538,7 @@ export class ChatSession {
         data: { level: evalResult.level, message: "讨论接近共识，可补充意见后即将收束", signals: evalResult.signals },
       });
     }
-    record.content = stripSelfRating(resp.content);
+    record.content = stripSelfRating(streamed);
     this._messages.push(record);
     this._updatedAt = new Date().toISOString();
     this._chatStore?.appendMessage(this.projectId, this.id, record);
@@ -573,9 +592,26 @@ export class ChatSession {
       ),
     ];
     this._emit({ type: "agent_status", data: { memberId: synthesizer.id, status: "generating" } });
-    const resp = await this._llm.achat(summaryMessages, {}, this._abort?.signal);
+    // 工单 09：合成者总结同样流式输出，以合成者身份上屏；最终经 done 事件带出 summary。
+    const messageId = "synth-" + randomUUID();
+    let streamed = "";
+    let lastDeltaAt = 0;
+    const emitDelta = (done: boolean): void => {
+      const now = Date.now();
+      if (!done && now - lastDeltaAt < 30) return;
+      lastDeltaAt = now;
+      this._emit({
+        type: "delta",
+        data: { messageId, memberId: synthesizer.id, memberName: synthesizer.name, content: streamed, done },
+      });
+    };
+    for await (const chunk of this._llm.astream(summaryMessages, {}, undefined, this._abort?.signal)) {
+      streamed += chunk;
+      emitDelta(false);
+    }
     if (this._status !== "synthesizing") return true; // 生成期间被作者终止
-    const summary = resp.content ?? "";
+    emitDelta(true);
+    const summary = streamed ?? "";
 
     this._status = "completed";
     this._updatedAt = new Date().toISOString();

@@ -11,8 +11,39 @@
       </template>
     </PageHeader>
 
-    <!-- 阶段 0：配置阶段 -->
-    <div v-if="phase === 'config'" class="config-panel">
+    <div class="chat-main-layout">
+      <!-- 左侧：会话列表 -->
+      <aside class="session-panel">
+        <div class="session-panel-header">
+          <span class="session-panel-title">讨论会话</span>
+          <el-button size="small" type="primary" plain :loading="starting" @click="goNewChat">
+            <el-icon style="margin-right: 4px"><ChatDotRound /></el-icon>
+            新建
+          </el-button>
+        </div>
+        <div class="session-list">
+          <div
+            v-for="s in sessions"
+            :key="s.id"
+            class="session-item"
+            :class="{ 'session-active': s.id === sessionId }"
+            @click="switchSession(s)"
+          >
+            <div class="session-item-top">
+              <span class="session-item-topic" :title="s.topic">{{ s.topic }}</span>
+              <el-tag :type="statusTagTypeFor(s.status)" size="small" effect="plain">{{ statusLabelFor(s.status) }}</el-tag>
+            </div>
+            <div class="session-item-meta">
+              <span>{{ s.messages.length }} 条消息</span>
+              <span>{{ formatDateTime(s.updatedAt) }}</span>
+            </div>
+          </div>
+          <el-empty v-if="sessions.length === 0" description="暂无讨论会话，点击「新建」开启" :image-size="60" />
+        </div>
+      </aside>
+
+      <!-- 阶段 0：配置阶段 -->
+      <div v-if="phase === 'config'" class="config-panel">
       <el-card shadow="never">
         <template #header>
           <div class="card-header">
@@ -82,10 +113,33 @@
       </el-card>
     </div>
 
-    <!-- 阶段 1：群聊房间 -->
-    <div v-else class="room-layout">
-      <!-- 成员面板 -->
-      <aside class="member-panel">
+    <!-- 阶段 1：群聊房间（中栏消息 + 右栏会话信息/成员） -->
+    <div v-else class="room-body">
+      <!-- 右侧：会话信息 + 成员（CSS order 置于消息区之后） -->
+      <aside class="info-panel">
+        <div class="info-panel-title">会话信息</div>
+        <div class="info-section">
+          <div class="info-row">
+            <span class="info-label">主题</span>
+            <span class="info-value info-topic">{{ topic }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">状态</span>
+            <el-tag :type="statusTagType" effect="plain" size="small">{{ statusLabel }}</el-tag>
+          </div>
+          <div class="info-row">
+            <span class="info-label">开始时间</span>
+            <span class="info-value">{{ formatDateTime(createdAt) }}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">消息数</span>
+            <span class="info-value">{{ messages.length }} 条</span>
+          </div>
+        </div>
+        <div v-if="summary" class="info-summary">
+          <div class="info-label">最终方案</div>
+          <div class="info-summary-text">{{ summary }}</div>
+        </div>
         <div class="member-panel-title">成员（{{ members.length }}）</div>
         <div class="member-list">
           <div
@@ -178,7 +232,7 @@
                   <span class="bubble-name">{{ msg.memberName }}</span>
                   <span class="bubble-time">{{ formatTime(msg.timestamp) }}</span>
                 </div>
-                <div class="bubble-text" v-html="renderMarkdown(msg.content)"></div>
+                <div class="bubble-text" v-html="renderMarkdown(msg.content + (msg.streaming ? ' ▌' : ''))"></div>
               </div>
             </div>
 
@@ -191,7 +245,7 @@
                   <el-tag :type="getCategoryTagType(msg.category)" size="small" effect="plain">{{ getCategoryLabel(msg.category) }}</el-tag>
                   <span class="bubble-time">{{ formatTime(msg.timestamp) }}</span>
                 </div>
-                <div class="bubble-text" v-html="renderMarkdown(msg.content)"></div>
+                <div class="bubble-text" v-html="renderMarkdown(msg.content + (msg.streaming ? ' ▌' : ''))"></div>
               </div>
             </div>
           </template>
@@ -222,6 +276,7 @@
       </main>
     </div>
   </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -236,6 +291,7 @@ import {
   readProjectDocument,
   getProjectMemory,
   getChatSession,
+  listChatSessions,
   startChatSession,
   sendChatMessage,
   stopChatSession,
@@ -245,12 +301,18 @@ import {
   type AgentRoleCategory,
   type ChatMember,
   type ChatMessageRecord,
+  type ChatSessionSnapshot,
   type ChatSessionEvent,
   type ChatSessionStatus,
   type ChatApplyTarget,
 } from '@/api'
 import { useCurrentProject } from '@/stores/currentProject'
 import PageHeader from '@/components/PageHeader.vue'
+
+/** 展示用消息：带流式光标标记（delta 进行中为 true，chat_message / done 到达后清除）。 */
+interface DisplayMessage extends ChatMessageRecord {
+  streaming?: boolean
+}
 
 const route = useRoute()
 const currentProject = useCurrentProject()
@@ -273,10 +335,12 @@ const form = ref({
 // 会话状态
 const sessionId = ref('')
 const topic = ref('')
+const createdAt = ref('')
 const members = ref<ChatMember[]>([])
-const messages = ref<ChatMessageRecord[]>([])
+const messages = ref<DisplayMessage[]>([])
 const sessionStatus = ref<ChatSessionStatus>('idle')
 const summary = ref('')
+const sessions = ref<ChatSessionSnapshot[]>([])
 const applying = ref<'' | ChatApplyTarget>('')
 const memberStatus = ref<Record<string, 'thinking' | 'generating' | 'idle'>>({})
 const speakingMemberId = ref('')
@@ -291,16 +355,7 @@ const SESSION_STORAGE_KEY = 'ai-novel-active-chat-session'
 
 const isRunning = computed(() => sessionStatus.value === 'running' || sessionStatus.value === 'synthesizing')
 
-const statusLabel = computed(() => {
-  const map: Record<ChatSessionStatus, string> = {
-    idle: '等待开始',
-    running: '讨论中',
-    synthesizing: '合成中',
-    completed: '已完成',
-    terminated: '已终止',
-  }
-  return map[sessionStatus.value] || sessionStatus.value
-})
+const statusLabel = computed(() => statusLabelFor(sessionStatus.value))
 
 const statusTagType = computed(() => {
   if (sessionStatus.value === 'completed') return 'success'
@@ -309,9 +364,40 @@ const statusTagType = computed(() => {
   return 'info'
 })
 
+const STATUS_LABELS: Record<ChatSessionStatus, string> = {
+  idle: '等待开始',
+  running: '讨论中',
+  synthesizing: '合成中',
+  completed: '已完成',
+  terminated: '已终止',
+}
+
+function statusLabelFor(status: ChatSessionStatus): string {
+  return STATUS_LABELS[status] || status
+}
+
+function statusTagTypeFor(status: ChatSessionStatus): string {
+  if (status === 'completed') return 'success'
+  if (status === 'terminated') return 'danger'
+  if (status === 'running' || status === 'synthesizing') return 'warning'
+  return 'info'
+}
+
+function formatDateTime(iso: string): string {
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    const date = d.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+    const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    return date + ' ' + time
+  } catch {
+    return ''
+  }
+}
+
 const displayMessages = computed(() => {
   const seen = new Set<string>()
-  const out: ChatMessageRecord[] = []
+  const out: DisplayMessage[] = []
   for (const m of messages.value) {
     if (seen.has(m.id)) continue
     seen.add(m.id)
@@ -450,6 +536,7 @@ async function startChat() {
     const data = res.data
     sessionId.value = data.sessionId
     topic.value = data.topic
+    createdAt.value = new Date().toISOString()
     members.value = data.members
     messages.value = []
     sessionStatus.value = data.status
@@ -463,9 +550,56 @@ async function startChat() {
   }
 }
 
+/** 返回配置阶段新建讨论（保留当前作品与已选角色）。 */
+function goNewChat() {
+  closeStream()
+  sessionId.value = ''
+  topic.value = ''
+  createdAt.value = ''
+  members.value = []
+  messages.value = []
+  sessionStatus.value = 'idle'
+  summary.value = ''
+  speakingMemberId.value = ''
+  speakingMemberName.value = ''
+  memberStatus.value = {}
+  sessionStorage.removeItem(SESSION_STORAGE_KEY)
+  phase.value = 'config'
+  if (currentProject.id) loadSessions()
+}
+
+/** 切换会话：关闭旧流 → 载入快照 → 进入房间 → 连接事件流。 */
+async function switchSession(s: ChatSessionSnapshot) {
+  if (!s || s.id === sessionId.value) return
+  closeStream()
+  sessionId.value = s.id
+  topic.value = s.topic
+  createdAt.value = s.createdAt || ''
+  members.value = s.members || []
+  messages.value = (s.messages || []).map((m) => ({ ...m, streaming: false }))
+  sessionStatus.value = s.status || 'idle'
+  summary.value = s.summary || ''
+  speakingMemberId.value = ''
+  speakingMemberName.value = ''
+  memberStatus.value = {}
+  enterRoom()
+}
+
+/** 加载项目内讨论会话列表（按 updatedAt 倒序）。 */
+async function loadSessions() {
+  if (!currentProject.id) return
+  try {
+    const res = await listChatSessions(currentProject.id)
+    sessions.value = res.data?.sessions || []
+  } catch (err) {
+    console.warn('加载讨论会话列表失败:', err)
+  }
+}
+
 function enterRoom() {
   phase.value = 'room'
   sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId: sessionId.value, projectId: currentProject.id }))
+  loadSessions()
   // 作者永远在成员列表中
   if (!members.value.some((m) => m.id === 'author')) {
     members.value = [
@@ -538,10 +672,37 @@ function handleChatEvent(event: ChatSessionEvent) {
     case 'chat_message': {
       const msg = event.data
       if (!msg || !msg.id) break
-      if (!messages.value.some((m) => m.id === msg.id)) {
-        messages.value.push(msg)
-        scrollToBottom()
+      const existing = messages.value.find((m) => m.id === msg.id)
+      if (existing) {
+        // 流式预览到达终稿：以终稿（已剥离自评行）替换并清除光标
+        existing.content = msg.content
+        existing.streaming = false
+      } else {
+        messages.value.push({ ...msg, streaming: false })
       }
+      scrollToBottom()
+      break
+    }
+    case 'delta': {
+      const data = event.data
+      if (!data || !data.messageId) break
+      const existing = messages.value.find((m) => m.id === data.messageId)
+      if (existing) {
+        existing.content = data.content
+        existing.streaming = !data.done
+      } else {
+        messages.value.push({
+          id: data.messageId,
+          sessionId: sessionId.value,
+          memberId: data.memberId,
+          memberName: data.memberName,
+          kind: data.memberId === 'author' ? 'author' : 'agent',
+          content: data.content,
+          timestamp: new Date().toISOString(),
+          streaming: !data.done,
+        })
+      }
+      scrollToBottom()
       break
     }
     case 'agent_status': {
@@ -557,7 +718,12 @@ function handleChatEvent(event: ChatSessionEvent) {
     }
     case 'consensus': {
       const data = event.data
-      pushSystemMessage('共识达成（置信度 ' + Math.round((data.level || 0) * 100) + '%）：' + (data.message || ''))
+      if (data.level >= 1 && /合成者产出最终方案/.test(data.message || '')) {
+        // 完整总结已在合成者流式预览中上屏，这里只给简短状态行，避免重复
+        pushSystemMessage('合成者已产出最终方案，讨论完成')
+      } else {
+        pushSystemMessage('共识达成（置信度 ' + Math.round((data.level || 0) * 100) + '%）：' + (data.message || ''))
+      }
       scrollToBottom()
       break
     }
@@ -566,12 +732,13 @@ function handleChatEvent(event: ChatSessionEvent) {
       sessionStatus.value = data.status || 'completed'
       speakingMemberId.value = ''
       speakingMemberName.value = ''
+      messages.value.forEach((m) => (m.streaming = false))
       if (data.summary) {
         summary.value = data.summary
-        pushSystemMessage('讨论总结：' + data.summary)
       }
-      pushSystemMessage(data.status === 'terminated' ? '讨论已终止' : '讨论已完成')
+      pushSystemMessage(data.status === 'terminated' ? '讨论已终止' : '讨论已完成，可查看右侧最终方案并应用')
       sessionStorage.removeItem(SESSION_STORAGE_KEY)
+      loadSessions()
       scrollToBottom()
       break
     }
@@ -580,8 +747,10 @@ function handleChatEvent(event: ChatSessionEvent) {
       sessionStatus.value = 'terminated'
       speakingMemberId.value = ''
       speakingMemberName.value = ''
+      messages.value.forEach((m) => (m.streaming = false))
       pushSystemMessage('讨论出错：' + (data.error || '未知错误'))
       sessionStorage.removeItem(SESSION_STORAGE_KEY)
+      loadSessions()
       scrollToBottom()
       ElMessage.error((data.error as string) || '讨论失败')
       break
@@ -666,6 +835,7 @@ async function restoreSession() {
     const data = res.data
     sessionId.value = data.id
     topic.value = data.topic
+    createdAt.value = data.createdAt || ''
     members.value = data.members
     messages.value = data.messages
     sessionStatus.value = data.status
@@ -685,6 +855,7 @@ onMounted(async () => {
     if (ids.length > 0) form.value.memberIds = ids
   }
   await loadRoles()
+  await loadSessions()
   await restoreSession()
 })
 
@@ -760,16 +931,17 @@ onBeforeUnmount(() => {
   margin-top: 8px;
 }
 
-/* ===== 房间布局 ===== */
-.room-layout {
+/* ===== 三栏主布局：左侧会话列表 + 中间配置/消息 + 右侧信息 ===== */
+.chat-main-layout {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 260px 1fr;
   gap: 16px;
   height: calc(100vh - 200px);
   min-height: 480px;
 }
 
-.member-panel {
+/* 左侧：会话列表 */
+.session-panel {
   background: var(--surface);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-lg);
@@ -777,6 +949,151 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
+}
+
+.session-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.session-panel-title {
+  font-weight: 600;
+  color: var(--text-title);
+}
+
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-item {
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.session-item:hover {
+  background: var(--surface-hover);
+}
+
+.session-item.session-active {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.session-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.session-item-topic {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-title);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.session-item-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-aux);
+}
+
+/* 中栏 + 右栏（房间态） */
+.room-body {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 16px;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* 右侧：会话信息 + 成员 */
+.info-panel {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.info-panel-title {
+  padding: 12px 16px;
+  font-weight: 600;
+  color: var(--text-title);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.info-section {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.info-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.info-label {
+  color: var(--text-aux);
+  flex-shrink: 0;
+}
+
+.info-value {
+  color: var(--text-regular);
+  text-align: right;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.info-topic {
+  font-weight: 600;
+  color: var(--text-title);
+}
+
+.info-summary {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.info-summary-text {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--text-regular);
+  line-height: 1.6;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .member-panel-title {
@@ -861,6 +1178,8 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
+  min-height: 0;
 }
 
 .chat-header {

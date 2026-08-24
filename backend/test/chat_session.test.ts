@@ -83,6 +83,27 @@ class FakeLLMClient {
     return { content, model: "fake" };
   }
 
+  /** 流式接口：按字符逐段吐出回复，与 achat 共用回复队列 / gate / 异常注入。 */
+  async *astream(
+    messages: Array<{ role: string; content?: string; name?: string | null }>,
+    _kwargs?: Record<string, unknown>,
+    onDelta?: (delta: { content?: string | null }) => void,
+    signal?: AbortSignal
+  ): AsyncGenerator<string> {
+    const name = (messages[0] as { name?: string | null } | undefined)?.name ?? "角色";
+    const systemPrompt = (messages[0] as { content?: string } | undefined)?.content ?? "";
+    const userPrompt = (messages[1] as { content?: string } | undefined)?.content ?? "";
+    this.calls.push({ content: name, systemPrompt, userPrompt });
+    if (this.gate) await this.gate;
+    if (this.failWith) throw this.failWith;
+    const content = this.replies.length > 0 ? this.replies.shift()! : "这是「" + name + "」的发言";
+    for (const ch of content) {
+      if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+      if (onDelta) onDelta({ content: ch });
+      yield ch;
+    }
+  }
+
   close(): void {}
 }
 
@@ -912,5 +933,80 @@ describe("ChatSession（工单 06：Embedding + 向量库）", () => {
 
     expect(session.getStatus()).toBe("completed");
     expect(session.getMessages().length).toBe(2);
+  });
+});
+
+describe("ChatSession（工单 09：流式输出）", () => {
+  const AGREE_1 = "我同意这个方案。\n【共识度：0.9】";
+  const AGREE_2 = "我也一致认可，可以定稿。\n【共识度：0.95】";
+  const SUMMARY =
+    "核心共识：第 10 章引入外部威胁。\n主要分歧：敌人身份。\n综合方案：分两幕推进。\n行动建议：先写人物反应。";
+
+  it("发言流式输出：delta 累计递增，最终 chat_message 完整且剥离自评行", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    fake.replies = [AGREE_1];
+    const session = new ChatSession({
+      projectId: "proj-9",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 1,
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.start();
+    const deltas = events.filter((e) => e.type === "delta");
+    expect(deltas.length).toBeGreaterThan(1);
+
+    // 累计内容：后一帧包含前一帧，逐字增长
+    const contents = deltas.map((e) => e.data.content);
+    for (let i = 1; i < contents.length; i++) {
+      expect(contents[i]!.startsWith(contents[i - 1]!)).toBe(true);
+      expect(contents[i]!.length).toBeGreaterThan(contents[i - 1]!.length);
+    }
+
+    // 最后一帧为完整原文（含自评行）且标记 done
+    expect(contents[contents.length - 1]).toBe(AGREE_1);
+    expect(deltas[deltas.length - 1]!.data.done).toBe(true);
+
+    // 最终 chat_message 与 delta 共用 messageId，且剥离自评行
+    const msg = events.find((e) => e.type === "chat_message")!;
+    expect(msg.data.id).toBe(deltas[0]!.data.messageId);
+    expect(msg.data.content).not.toContain("共识度");
+    expect(msg.data.content).toContain("我同意这个方案");
+  });
+
+  it("合成者总结流式输出：delta 逐段累积，done 带完整 summary", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    fake.replies = [AGREE_1, AGREE_2, SUMMARY];
+    const session = new ChatSession({
+      projectId: "proj-9",
+      topic: "t",
+      members: makeMembersWithSynthesizer(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 4,
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.start();
+    const synthDeltas = events.filter(
+      (e) => e.type === "delta" && e.data.memberId === "r3"
+    );
+    expect(synthDeltas.length).toBeGreaterThan(1);
+    expect(synthDeltas[synthDeltas.length - 1]!.data.done).toBe(true);
+    expect(synthDeltas[synthDeltas.length - 1]!.data.content).toBe(SUMMARY);
+
+    const done = events.find((e) => e.type === "done")!;
+    expect((done.data as { status: string; summary?: string }).summary).toBe(SUMMARY);
   });
 });
