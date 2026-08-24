@@ -1064,37 +1064,11 @@ export async function* chatSessionStream(sessionId: string): AsyncGenerator<Chat
       }
       if (!data || !knownEvents.has(eventType)) continue
       try {
-        yield JSON.parse(data) as ChatSessionEvent
+        // 组装 { type, data } 事件结构：event: 行决定类型，data: 行解析为负载
+        yield { type: eventType, data: JSON.parse(data) } as ChatSessionEvent
       } catch {
         // 忽略无法解析的帧
       }
     }
   }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
