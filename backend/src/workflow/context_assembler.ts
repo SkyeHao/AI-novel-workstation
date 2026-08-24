@@ -111,11 +111,15 @@ export class ContextAssembler {
     };
 
     // ---- L3 全局要点 ----
-    const l3Lines = ["- 关键议题：" + input.topic];
+    // 标题仅作会话名，不再注入「关键议题」；L3 只承载作者历史指令，
+    // 无指令时渲染占位，保证【全局要点】层级始终存在（供测试断言顺序）。
     const author = (input.authorInstructions ?? []).filter(Boolean);
+    const l3Lines: string[] = [];
     if (author.length > 0) {
       l3Lines.push("- 作者历史指令：");
       l3Lines.push(...author.map((a) => "  · " + a));
+    } else {
+      l3Lines.push("  （暂无，请基于最近讨论自主发挥）");
     }
     const l3Layer: ContextLayer = { key: "l3", label: "全局要点", text: "【全局要点】\n" + l3Lines.join("\n") };
 

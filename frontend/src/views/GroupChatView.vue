@@ -62,12 +62,12 @@
         />
 
         <el-form :model="form" label-width="100px">
-          <el-form-item label="讨论主题" required>
+          <el-form-item label="会话标题" required>
             <el-input
               v-model="form.topic"
               type="textarea"
               :rows="3"
-              placeholder="例如：主角在第 10 章应该遇到什么危机？如何推动剧情发展？"
+              placeholder="给这个讨论会话起个名字，例如：第 10 章剧情走向讨论"
             />
           </el-form-item>
 
@@ -179,7 +179,7 @@
             <span class="chat-topic-text">{{ topic }}</span>
           </div>
           <div class="chat-header-actions">
-            <el-button v-if="isRunning" type="danger" plain size="small" :loading="stopping" @click="stopChat">
+            <el-button v-if="isRunning || sessionStatus === 'idle'" type="danger" plain size="small" :loading="stopping" @click="stopChat">
               <el-icon style="margin-right: 4px"><VideoPause /></el-icon>
               终止讨论
             </el-button>
@@ -258,16 +258,22 @@
               v-model="draft"
               type="textarea"
               :rows="2"
-              :disabled="!isRunning"
+              :disabled="!canSend"
               resize="none"
-              :placeholder="isRunning ? '输入你的发言，按 Ctrl+Enter 发送' : '讨论已结束，无法发送消息'"
+              :placeholder="
+                sessionStatus === 'idle'
+                  ? '输入第一条消息，开启讨论'
+                  : isRunning
+                    ? '输入你的发言，按 Ctrl+Enter 发送'
+                    : '讨论已结束，无法发送消息'
+              "
               @keydown.ctrl.enter.prevent="sendAuthorMessage"
             />
           </div>
           <div class="chat-input-actions">
             <span v-if="sending" class="sending-tip"><el-icon class="is-loading"><Loading /></el-icon> 发送中…</span>
-            <span v-if="isRunning" class="mention-tip">点击左侧成员可快速 @</span>
-            <el-button type="primary" :disabled="!isRunning || !draft.trim()" :loading="sending" @click="sendAuthorMessage">
+            <span v-if="canSend" class="mention-tip">点击左侧成员可快速 @</span>
+            <el-button type="primary" :disabled="!canSend || !draft.trim()" :loading="sending" @click="sendAuthorMessage">
               <el-icon style="margin-right: 4px"><Promotion /></el-icon>
               发送
             </el-button>
@@ -354,6 +360,8 @@ let reconnectAttempts = 0
 const SESSION_STORAGE_KEY = 'ai-novel-active-chat-session'
 
 const isRunning = computed(() => sessionStatus.value === 'running' || sessionStatus.value === 'synthesizing')
+/** 可发送：idle（等待首条消息激活）或运行中；结束后不可发送。 */
+const canSend = computed(() => sessionStatus.value === 'idle' || isRunning.value)
 
 const statusLabel = computed(() => statusLabelFor(sessionStatus.value))
 
@@ -445,7 +453,7 @@ function memberStatusText(memberId: string): string {
 
 /** 工单 03：点击成员快速 @ 该角色，插入到输入框。 */
 function quickMention(member: ChatMember) {
-  if (!isRunning.value) return
+  if (!canSend.value) return
   if (member.kind === 'author') return
   const name = member.name
   if (draft.value.includes('@' + name)) return
@@ -542,6 +550,7 @@ async function startChat() {
     sessionStatus.value = data.status
     summary.value = ''
     enterRoom()
+    pushSystemMessage('讨论已创建，发送第一条消息开启讨论')
   } catch (err: any) {
     console.error('开启群聊失败:', err)
     ElMessage.error((err?.response?.data?.error as string) || '开启群聊失败')
@@ -760,7 +769,7 @@ function handleChatEvent(event: ChatSessionEvent) {
 
 async function sendAuthorMessage() {
   const content = draft.value.trim()
-  if (!content || !sessionId.value || !isRunning.value) return
+  if (!content || !sessionId.value || !canSend.value) return
   sending.value = true
   try {
     await sendChatMessage(sessionId.value, content)

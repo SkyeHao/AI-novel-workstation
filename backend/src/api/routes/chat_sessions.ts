@@ -133,12 +133,7 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
       vector: getVectorBundle() ? { embedding: _vectorBundle!.embedding, store: _vectorBundle!.store } : undefined,
     });
     _sessions.set(sessionId, session);
-    try {
-      session.start().catch(() => {});
-    } catch (err) {
-      return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
-    }
-
+    // 会话创建后停在 idle：由作者第一条消息激活，标题仅作会话名
     return { sessionId, status: session.getStatus(), members, topic };
   });
 

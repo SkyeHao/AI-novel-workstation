@@ -207,9 +207,19 @@ export class ChatSession {
   /**
    * 开始讨论：idle → running，推送成员加入等系统事件，随后驱动发言循环。
    * 返回的 Promise 在会话结束（completed / terminated）时 resolve；异常在内部消化为 error 事件。
+   * 注：当前产品流程改为「首条作者消息激活」，start() 保留供测试与兼容，路由不再调用。
    */
   start(): Promise<void> {
     if (this._status !== "idle") throw new ChatSessionError("会话已在运行或已结束");
+    this._activate();
+    this._completion = this._prepareAndDrive().finally(() => {
+      this._updatedAt = new Date().toISOString();
+    });
+    return this._completion;
+  }
+
+  /** 激活会话：idle → running，推送成员加入等系统事件并落盘初始记录。 */
+  private _activate(): void {
     this._status = "running";
     this._updatedAt = new Date().toISOString();
     this._abort = new AbortController();
@@ -223,17 +233,21 @@ export class ChatSession {
 
     // 工单 07：落盘初始记录（建文件），后续消息增量追加
     this._chatStore?.save(this.getSnapshot());
-    this._completion = this._prepareAndDrive().finally(() => {
-      this._updatedAt = new Date().toISOString();
-    });
-    return this._completion;
   }
 
-  /** 作者发言：实时插入（不阻塞当前 Agent 生成），计入讨论历史并推送。工单 03 增强 @ 与优先调度。 */
+  /**
+   * 作者发言：实时插入（不阻塞当前 Agent 生成），计入讨论历史并推送。工单 03 增强 @ 与优先调度。
+   * idle 会话（创建后未开始）收到首条作者消息时激活：idle → running 并启动发言循环，
+   * 使「标题只作会话名」——真正的讨论从作者发出第一条消息开始。
+   */
   async sendUserMessage(content: string): Promise<ChatMessageRecord> {
     const text = String(content ?? "").trim();
     if (!text) throw new ChatSessionError("消息不能为空");
-    if (this._status !== "running") throw new ChatSessionError("会话未在运行中，无法发送消息");
+    if (this._status === "terminated" || this._status === "completed") {
+      throw new ChatSessionError("会话已结束，无法发送消息");
+    }
+    const activating = this._status === "idle";
+    if (activating) this._activate();
     const record: ChatMessageRecord = {
       id: randomUUID(),
       sessionId: this.id,
@@ -260,6 +274,12 @@ export class ChatSession {
       this._scheduler.mention(id);
     }
     this._emit({ type: "chat_message", data: record });
+    // 首条消息激活：作者消息已入历史，随后后台驱动发言循环（fire-and-forget，同 start()）
+    if (activating) {
+      this._completion = this._prepareAndDrive().finally(() => {
+        this._updatedAt = new Date().toISOString();
+      });
+    }
     return record;
   }
 
@@ -475,8 +495,7 @@ export class ChatSession {
     // 工单 05：分层上下文组装（系统提示 + 静态设定 + L3/L2/L1 + 触发消息 + 任务），按预算降级
     const triggerMessage = this._messages.length > 0 ? this._messages[this._messages.length - 1] : undefined;
     const taskPrompt =
-      "讨论主题：" + this.topic +
-      "\n\n请作为「" + member.name + "」发言，承接最近的讨论并发表你的观点。" +
+      "请作为「" + member.name + "」发言，承接最近的讨论（尤其是作者的发言与要求）并发表你的观点。" +
       "\n\n发言要求：请在结尾单独一行输出你的共识自评，格式：【共识度：0~1】。" +
       "0 表示完全不认同当前讨论方向，1 表示完全达成一致。";
     const assembled = this._assembler.assemble({
@@ -586,8 +605,7 @@ export class ChatSession {
       new ChatMessage(Role.SYSTEM, synthesizer.systemPrompt || "你是剧情讨论的合成者。", undefined, synthesizer.name),
       new ChatMessage(
         Role.USER,
-        "讨论主题：" + this.topic +
-          "\n\n请基于以下讨论记录，输出结构化最终方案，包含四部分：核心共识、主要分歧、综合方案、行动建议。" +
+        "请基于以下讨论记录，输出结构化最终方案，包含四部分：核心共识、主要分歧、综合方案、行动建议。" +
           "\n\n讨论记录：\n" + (recent || "（暂无记录）")
       ),
     ];

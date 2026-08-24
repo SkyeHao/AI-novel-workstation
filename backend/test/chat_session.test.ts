@@ -1010,3 +1010,61 @@ describe("ChatSession（工单 09：流式输出）", () => {
     expect((done.data as { status: string; summary?: string }).summary).toBe(SUMMARY);
   });
 });
+
+describe("ChatSession（首条消息激活：标题仅作会话名）", () => {
+  it("不调用 start，首条作者消息激活：idle → running → completed，标题不入提示词", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    fake.replies = ["我是「冲突制造者」，基于你的要求给出方案。\n【共识度：0.8】"];
+    const session = new ChatSession({
+      projectId: "proj-10",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 1,
+      onEvent: (e) => events.push(e),
+    });
+
+    expect(session.getStatus()).toBe("idle");
+    const authorPromise = session.sendUserMessage("请基于当前剧情给出建议");
+    // 首条消息同步完成激活（未注入 vector，无 await 挂起点）
+    expect(session.getStatus()).toBe("running");
+    await authorPromise;
+
+    // 发言循环后台运行（fire-and-forget），等待会话自然结束
+    await vi.waitFor(() => expect(session.getStatus()).toBe("completed"));
+
+    // 业务事件顺序：系统（讨论开始）→ 作者消息 → agent 消息
+    const business = events.filter((e) => e.type === "system" || e.type === "chat_message");
+    expect(business[0]!.type).toBe("system");
+    const authorIdx = business.findIndex((e) => e.type === "chat_message" && e.data.kind === "author");
+    const agentIdx = business.findIndex((e) => e.type === "chat_message" && e.data.kind === "agent");
+    expect(authorIdx).toBeGreaterThanOrEqual(0);
+    expect(agentIdx).toBeGreaterThan(authorIdx);
+
+    // 首条 agent 提示：不注入「讨论主题」，任务要求保留
+    const userPrompt = fake.calls[0]!.userPrompt;
+    expect(userPrompt).not.toMatch(/讨论主题/);
+    expect(userPrompt).toContain("请作为");
+  });
+
+  it("idle 会话可被终止（放弃空会话），结束后无法再发消息", async () => {
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-10",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+    });
+    expect(session.getStatus()).toBe("idle");
+    session.stop();
+    expect(session.getStatus()).toBe("terminated");
+    await expect(session.sendUserMessage("hi")).rejects.toThrow(/已结束/);
+  });
+});
