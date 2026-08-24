@@ -1038,6 +1038,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
+  order: 2;
 }
 
 .info-panel-title {
@@ -1180,6 +1181,7 @@ onBeforeUnmount(() => {
   overflow: hidden;
   min-width: 0;
   min-height: 0;
+  order: 1;
 }
 
 .chat-header {
