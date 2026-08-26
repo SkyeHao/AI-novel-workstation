@@ -1,4 +1,4 @@
-import axios from 'axios'
+﻿import axios from 'axios'
 
 // ============ 基础类型 ============
 
@@ -939,6 +939,21 @@ export const clearInteractions = (source?: string) =>
 
 // ============ Agent 角色蓝图 ============
 
+// ============ 创作引擎节点提示词（可编辑） ============
+
+export interface NodePromptDetail {
+  key: string
+  label: string
+  prompt: string
+  defaultPrompt: string
+  isCustom: boolean
+  updatedAt: string | null
+}
+
+export const getNodePrompts = () => apiClient.get<{ prompts: NodePromptDetail[] }>('/prompts')
+export const getNodePrompt = (key: string) => apiClient.get<NodePromptDetail>(`/prompts/${key}`)
+export const updateNodePrompt = (key: string, prompt: string) => apiClient.put<NodePromptDetail>(`/prompts/${key}`, { prompt })
+export const resetNodePrompt = (key: string) => apiClient.post<NodePromptDetail>(`/prompts/${key}/reset`)
 export const getAgentRoles = () => apiClient.get<AgentRoleAsset[]>('/agent-roles')
 export const getAgentRole = (id: string) => apiClient.get<AgentRoleAsset>(`/agent-roles/${id}`)
 export const createAgentRole = (data: CreateAgentRoleRequest) => apiClient.post<AgentRoleAsset>('/agent-roles', data)
@@ -982,6 +997,16 @@ export type ChatSessionEvent =
   | { type: 'speaker'; data: { memberId: string; memberName: string; scores: Record<string, number>; reason: string } }
   | { type: 'agent_status'; data: { memberId: string; status: 'thinking' | 'generating' | 'idle' } }
   | { type: 'consensus'; data: { level: number; message: string; signals?: string[] } }
+  | {
+      type: 'willingness_probe';
+      data: {
+        round: number;
+        results: Array<{ memberId: string; memberName: string; category?: string; willingness: number; confidence: number; reason: string; wouldMention: string[]; parseOk: boolean }>;
+        chosenId: string | null;
+        fallback: boolean;
+        threshold: number;
+      };
+    }
   | { type: 'done'; data: { status: 'completed' | 'terminated'; summary?: string } }
   | { type: 'error'; data: { error: string } }
 

@@ -1,8 +1,8 @@
-<template>
+﻿<template>
   <div class="group-chat-view">
     <PageHeader
-      :title="phase === 'config' ? '群聊式剧情讨论' : '群聊房间'"
-      :subtitle="phase === 'config' ? '多个 Agent 角色围绕剧情自由讨论，作者可作为群聊成员参与' : '正在围绕讨论主题实时讨论，作者可随时发言或终止'"
+      :title="phase === 'config' ? '圆桌会议' : '圆桌会议'"
+      :subtitle="phase === 'config' ? '多个 Agent 角色围绕剧情自由讨论，作者可作为圆桌会议成员参与' : '正在围绕讨论主题实时讨论，作者可随时发言或终止'"
       icon="ChatLineSquare"
     >
       <template #actions>
@@ -57,7 +57,7 @@
       <el-card shadow="never">
         <template #header>
           <div class="card-header">
-            <span>开启群聊</span>
+            <span>开启圆桌会议</span>
           </div>
         </template>
 
@@ -67,7 +67,7 @@
           :closable="false"
           show-icon
           title="尚未选择作品"
-          description="请在右上角切换作品后，再开始群聊讨论。"
+          description="请在右上角切换作品后，再开始圆桌会议讨论。"
           style="margin-bottom: 16px"
         />
 
@@ -117,13 +117,13 @@
         <div class="config-actions">
           <el-button type="primary" :disabled="!currentProject.id || !form.topic.trim() || form.memberIds.length === 0" :loading="starting" @click="startChat">
             <el-icon style="margin-right: 4px"><ChatDotRound /></el-icon>
-            开始群聊
+            开始圆桌会议
           </el-button>
         </div>
       </el-card>
     </div>
 
-    <!-- 阶段 1：群聊房间（中栏消息 + 右栏会话信息/成员） -->
+    <!-- 阶段 1：圆桌会议（中栏消息 + 右栏会话信息/成员） -->
     <div v-else class="room-body">
       <!-- 右侧：会话信息 + 成员（CSS order 置于消息区之后） -->
       <aside class="info-panel">
@@ -156,7 +156,7 @@
             v-for="m in members"
             :key="m.id"
             class="member-item"
-            :class="{ 'member-speaking': speakingMemberId === m.id, 'member-clickable': m.kind === 'agent' }"
+            :class="{ 'member-speaking': speakingMemberId === m.id, 'member-clickable': m.kind === 'agent', 'member-probing': probingIds.includes(m.id) }"
             :title="m.kind === 'agent' ? '点击快速 @' + m.name : ''"
             @click="quickMention(m)"
           >
@@ -227,8 +227,29 @@
           <span>「{{ speakingMemberName }}」正在发言…</span>
         </div>
 
+        <!-- 意愿征询：并行询问全员后的结果条（可折叠，默认收起不打扰） -->
+        <div v-if="lastProbe" class="willingness-strip">
+          <div class="willingness-header" @click="probeOpen = !probeOpen">
+            <el-icon><Finished /></el-icon>
+            <span class="willingness-title">意愿征询</span>
+            <el-tag v-if="lastProbe.fallback" size="small" type="info" effect="plain">走兜底</el-tag>
+            <el-tag v-else size="small" type="success" effect="plain">已选 {{ members.find((m) => m.id === lastProbe!.chosenId)?.name ?? lastProbe!.chosenId }}</el-tag>
+            <el-icon class="willingness-arrow" :class="{ open: probeOpen }"><ArrowDown /></el-icon>
+          </div>
+          <el-collapse-transition>
+            <div v-show="probeOpen" class="willingness-body">
+              <div v-for="r in [...lastProbe.results].sort((a, b) => b.willingness - a.willingness)" :key="r.memberId" class="willingness-row" :class="{ chosen: r.memberId === lastProbe!.chosenId }">
+                <span class="willingness-name">{{ r.memberName }}</span>
+                <el-tag :type="(r.category as any) === 'proposer' ? 'primary' : (r.category as any) === 'synthesizer' ? 'warning' : 'info'" size="small" effect="plain">{{ r.willingness.toFixed(2) }}</el-tag>
+                <span class="willingness-reason">{{ r.reason }}</span>
+                <span v-if="!r.parseOk" class="willingness-parse">解析失败</span>
+              </div>
+            </div>
+          </el-collapse-transition>
+        </div>
+
         <div class="message-list" ref="messageListRef">
-          <template v-for="msg in displayMessages" :key="msg.id">
+      <template v-for="msg in displayMessages" :key="msg.id">
             <!-- 系统消息 -->
             <div v-if="msg.kind === 'system'" class="system-message">
               <div class="system-dot"></div>
@@ -364,6 +385,9 @@ const speakingMemberId = ref('')
 const speakingMemberName = ref('')
 const draft = ref('')
 const messageListRef = ref<HTMLElement | null>(null)
+const probingIds = ref<string[]>([])
+const lastProbe = ref<null | { round: number; results: Array<{ memberId: string; memberName: string; category?: string; willingness: number; confidence: number; reason: string; wouldMention: string[]; parseOk: boolean }>; chosenId: string | null; fallback: boolean; threshold: number }>(null)
+const probeOpen = ref(false)
 
 let streamController: AbortController | null = null
 let reconnectTimer: number | null = null
@@ -563,8 +587,8 @@ async function startChat() {
     enterRoom()
     pushSystemMessage('讨论已创建，发送第一条消息开启讨论')
   } catch (err: any) {
-    console.error('开启群聊失败:', err)
-    ElMessage.error((err?.response?.data?.error as string) || '开启群聊失败')
+    console.error('开启圆桌会议失败:', err)
+    ElMessage.error((err?.response?.data?.error as string) || '开启圆桌会议失败')
   } finally {
     starting.value = false
   }
@@ -583,6 +607,9 @@ function goNewChat() {
   speakingMemberId.value = ''
   speakingMemberName.value = ''
   memberStatus.value = {}
+  probingIds.value = []
+  lastProbe.value = null
+  probeOpen.value = false
   sessionStorage.removeItem(SESSION_STORAGE_KEY)
   phase.value = 'config'
   if (currentProject.id) loadSessions()
@@ -602,6 +629,9 @@ async function switchSession(s: ChatSessionSnapshot) {
   speakingMemberId.value = ''
   speakingMemberName.value = ''
   memberStatus.value = {}
+  probingIds.value = []
+  lastProbe.value = null
+  probeOpen.value = false
   enterRoom()
 }
 
@@ -620,6 +650,9 @@ function enterRoom() {
   phase.value = 'room'
   sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId: sessionId.value, projectId: currentProject.id }))
   loadSessions()
+  probingIds.value = [];
+  lastProbe.value = null;
+  probeOpen.value = false;
   // 作者永远在成员列表中
   if (!members.value.some((m) => m.id === 'author')) {
     members.value = [
@@ -680,9 +713,26 @@ function scheduleReconnect() {
 }
 
 function handleChatEvent(event: ChatSessionEvent) {
-  if (!event || !event.type) return
-  switch (event.type) {
-    case 'system': {
+    if (!event || !event.type) return
+    switch (event.type) {
+      case 'willingness_probe': {
+        const d = event.data as unknown as { round: number; results: Array<{ memberId: string; memberName: string; category?: string; willingness: number; confidence: number; reason: string; wouldMention: string[]; parseOk: boolean }>; chosenId: string | null; fallback: boolean; threshold: number };
+        probingIds.value = [];
+        lastProbe.value = { round: d.round, results: d.results ?? [], chosenId: d.chosenId ?? null, fallback: !!d.fallback, threshold: d.threshold ?? 0.35 };
+        probeOpen.value = false;
+        const header = d.fallback ? '暂无人主动发言（阈值 ' + d.threshold + '），将按等待与相关性兜底选择' : '意愿征询完成（' + (d.results?.length ?? 0) + ' 位）';
+        let detail = '';
+        if (d.results && d.results.length > 0) {
+          const __chosenId = d.chosenId;
+          const rows = [...d.results].sort((a, b) => b.willingness - a.willingness).map((r) => '· ' + r.memberName + ' ' + r.willingness.toFixed(2) + (__chosenId === r.memberId ? ' ←选中' : '') + '「' + r.reason + '」');
+          // 上屏为可折叠的系统消息，默认收起不打扰
+          detail = '\n' + rows.join('\n');
+        }
+        pushSystemMessage(header + detail);
+        scrollToBottom();
+        break;
+      }
+      case 'system': {
       const data = event.data
       if (data.status) sessionStatus.value = data.status
       if (data.message) pushSystemMessage(data.message)
@@ -819,6 +869,7 @@ function closeStream() {
     streamController.abort()
     streamController = null
   }
+  probingIds.value = [];
 }
 
 /** 删除会话：二次确认 → 关闭当前流 → 后端彻底删除 → 刷新列表。 */
@@ -1178,6 +1229,13 @@ onBeforeUnmount(() => {
   background: var(--accent-soft);
   outline: 1px solid var(--accent-border);
 }
+.member-item.member-probing {
+  animation: probing-pulse 1.1s ease-in-out infinite;
+}
+@keyframes probing-pulse {
+  0% { box-shadow: 0 0 0 0 var(--accent-border); }
+  100% { box-shadow: 0 0 0 8px transparent; }
+}
 
 .member-avatar {
   width: 36px;
@@ -1263,6 +1321,55 @@ onBeforeUnmount(() => {
   color: var(--accent);
   font-size: 13px;
   border-bottom: 1px solid var(--accent-border);
+}
+.willingness-strip {
+  border-top: 1px dashed var(--border-soft);
+  border-bottom: 1px dashed var(--border-soft);
+  padding: 6px 16px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.willingness-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.willingness-title {
+  font-weight: 600;
+}
+.willingness-arrow {
+  margin-left: auto;
+  transition: transform 0.15s ease;
+}
+.willingness-arrow.open {
+  transform: rotate(180deg);
+}
+.willingness-body {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.willingness-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.willingness-row.chosen {
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.willingness-name {
+  min-width: 80px;
+  font-weight: 600;
+}
+.willingness-reason {
+  color: var(--text-aux);
+}
+.willingness-parse {
+  color: var(--el-color-danger);
 }
 
 .apply-panel {

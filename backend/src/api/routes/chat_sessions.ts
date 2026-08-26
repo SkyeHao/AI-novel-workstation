@@ -135,8 +135,11 @@ export async function chatSessionsRoutes(app: FastifyInstance): Promise<void> {
       // 工单 07：讨论记录 / 共识 / 最终方案按书落盘
       chatStore: getChatStore(),
       // 工单 06：注入本地 Embedding + Qdrant；不可用时降级，不阻断
-      vector: getVectorBundle() ? { embedding: _vectorBundle!.embedding, store: _vectorBundle!.store } : undefined,
-    });
+              // 纯 LLM 共识：不计成本，默认启用 LLM 裁判
+        consensus: { useLLM: true },
+      vector: getVectorBundle() ? { embedding: getVectorBundle()!.embedding, store: getVectorBundle()!.store } : undefined,
+      willingness: { enabled: true, threshold: 0.35, maxTokens: 90, timeoutMs: 1600 },
+      });
     // 工单 09：通过会话事件追踪「当前发言成员」，让群聊 LLM 调用记录标注到具体成员
     const memberNameById = new Map(members.map((m) => [m.id, m.name]));
     session.subscribe((event) => {

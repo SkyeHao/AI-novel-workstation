@@ -13,6 +13,9 @@ import { SpeakerScheduler, type WillingnessBreakdown } from "./speaker_scheduler
 import type { SpeakerSchedulerOptions } from "./speaker_scheduler.js";
 import { ConsensusDetector, stripSelfRating } from "./consensus_detector.js";
 import type { ConsensusDetectorOptions } from "./consensus_detector.js";
+import { LLMConsensusDetector, type LLMConsensusDetectorOptions } from "./llm_consensus_detector.js";
+import { probeAllWillingness } from "./willingness_probe.js";
+import type { WillingnessProbeResult } from "./willingness_probe.js";
 import { ContextAssembler, type ContextAssemblerOptions } from "./context_assembler.js";
 import type { EmbeddingService } from "../vector/embedding.js";
 import type { VectorStore } from "../vector/store.js";
@@ -76,8 +79,18 @@ export type ChatSessionEvent =
       type: "speaker";
       data: { memberId: string; memberName: string; scores: Record<string, number>; reason: string };
     }
-  | { type: "agent_status"; data: { memberId: string; status: "thinking" | "generating" | "idle" } }
-  | { type: "consensus"; data: { level: number; message: string; signals?: string[] } }
+   | { type: "agent_status"; data: { memberId: string; status: "thinking" | "generating" | "idle" } }
+   | { type: "consensus"; data: { level: number; message: string; signals?: string[] } }
+  | {
+      type: "willingness_probe";
+      data: {
+        round: number;
+        results: Array<{ memberId: string; memberName: string; category?: AgentRoleCategory; willingness: number; confidence: number; reason: string; wouldMention: string[]; parseOk: boolean }>;
+        chosenId: string | null;
+        fallback: boolean;
+        threshold: number;
+      };
+    }
   | { type: "done"; data: { status: "completed" | "terminated"; summary?: string } }
   | { type: "error"; data: { error: string } };
 
@@ -110,10 +123,16 @@ export interface ChatSessionConfig {
   };
   /** 持久化存储（工单 07）：注入后会话记录 / 共识 / 最终方案按书落盘；缺省不持久化。 */
   chatStore?: ChatStore;
-  /** 共识检测配置（工单 04：阈值 / 连续轮数 / 收敛判定可注入；工单 06 注入向量聚类） */
-  consensus?: ConsensusDetectorOptions;
+  /** 共识检测配置（工单 04：阈值 / 连续轮数 / 收敛判定可注入；工单 06 注入向量聚类）
+   *  新增 useLLM=true 时启用纯 LLM 裁判（11-LLM共识），此时忽略阈值/权重，改由 LLM 全量窗口判定。
+   */
+  consensus?: ConsensusDetectorOptions & {
+    useLLM?: boolean;
+    llmJudge?: LLMConsensusDetectorOptions;
+  };
   /** 上下文组装配置（工单 05：L1/L2 条数、token 预算等；测试注入小预算验证降级） */
   context?: ContextAssemblerOptions;
+  willingness?: { enabled?: boolean; threshold?: number; maxTokens?: number; timeoutMs?: number };
   onEvent?: (event: ChatSessionEvent) => void;
 }
 
@@ -139,7 +158,8 @@ export class ChatSession {
   private _updatedAt: string;
   private _nowFn: () => number;
   private _scheduler: SpeakerScheduler;
-  private _detector: ConsensusDetector;
+  private _detector: ConsensusDetector | LLMConsensusDetector;
+  private _useLLMConsensus = false;
   /** 是否已推送过「接近共识」预警（防止重复） */
   private _consensusWarned = false;
   /** 作者历史指令（最近 5 条），进入 L3 全局要点（工单 05） */
@@ -156,6 +176,8 @@ export class ChatSession {
   private _consensusNodes: ChatConsensusNode[] = [];
   /** 最终方案（合成者总结），工单 07 进入快照 / 落库 */
   private _summary: string | undefined;
+  private _willingnessCfg: { enabled: boolean; threshold: number; maxTokens: number; timeoutMs: number };
+  private _lastProbeTriggerId: string | null = null;
 
   constructor(config: ChatSessionConfig) {
     this.id = config.id ?? randomUUID();
@@ -185,11 +207,22 @@ export class ChatSession {
         ? (member, recentText) => this._vectorContext!.relevance(member, recentText)
         : config.relevanceFn,
     });
-    const consensusOptions: ConsensusDetectorOptions = { ...config.consensus };
-    if (!consensusOptions.convergenceFn && this._vectorContext) {
-      consensusOptions.convergenceFn = (recent) => this._vectorContext!.convergence(recent);
+    const useLLM = !!(config.consensus as any)?.useLLM;
+    this._useLLMConsensus = useLLM;
+    if (useLLM) {
+      const { useLLM: _u, llmJudge, ...rest } = (config.consensus ?? {}) as any;
+      this._detector = new LLMConsensusDetector(this._llm, this.topic, this.members, {
+        requiredStreak: (rest as ConsensusDetectorOptions).requiredStreak,
+        recentWindow: (rest as ConsensusDetectorOptions).recentWindow,
+        ...(llmJudge ?? {}),
+      });
+    } else {
+      const consensusOptions: ConsensusDetectorOptions = { ...config.consensus };
+      if (!consensusOptions.convergenceFn && this._vectorContext) {
+        consensusOptions.convergenceFn = (recent) => this._vectorContext!.convergence(recent);
+      }
+      this._detector = new ConsensusDetector(consensusOptions);
     }
-    this._detector = new ConsensusDetector(consensusOptions);
     this._assembler = new ContextAssembler({
       sharedContextKeys: [],
       countTokens: this._llm.count_text_tokens.bind(this._llm),
@@ -197,6 +230,12 @@ export class ChatSession {
     });
     this.createdAt = new Date().toISOString();
     this._updatedAt = this.createdAt;
+    this._willingnessCfg = {
+      enabled: config.willingness?.enabled ?? false,
+      threshold: config.willingness?.threshold ?? 0.35,
+      maxTokens: config.willingness?.maxTokens ?? 100,
+      timeoutMs: config.willingness?.timeoutMs ?? 1800,
+    };
     if (config.onEvent) this.subscribe(config.onEvent);
   }
 
@@ -414,10 +453,16 @@ export class ChatSession {
     try {
       let turns = 0;
       while (this._status === "running" && turns < this._maxRounds) {
-        let speaker = this._scheduler.pickNext(this._now());
+        let speaker: ChatMember | null = null;
+        if (this._willingnessCfg.enabled && this._messages.length > 0) {
+          speaker = await this._pickByWillingnessProbe(turns);
+        }
         if (!speaker) {
-          speaker = await this._waitForIdleBackstop();
-          if (!speaker) continue;
+          speaker = this._scheduler.pickNext(this._now());
+          if (!speaker) {
+            speaker = await this._waitForIdleBackstop();
+            if (!speaker) continue;
+          }
         }
         await this._runAgentTurn(speaker);
         this._scheduler.recordTurn(speaker.id);
@@ -481,6 +526,41 @@ export class ChatSession {
       }, this._backstopPollMs);
       signal?.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  private async _pickByWillingnessProbe(round: number): Promise<ChatMember | null> {
+    const trigger = this._messages[this._messages.length - 1];
+    if (!trigger) return null;
+    if (this._lastProbeTriggerId === trigger.id) return null;
+    this._lastProbeTriggerId = trigger.id;
+    if (this._status !== "running") return null;
+    const signal = this._abort?.signal;
+    if (signal?.aborted) return null;
+    const agents = this.members.filter((m) => m.kind === "agent");
+    if (agents.length === 0) return null;
+    const mentioned = new Set(this._resolveMentions(trigger.content));
+    let results: WillingnessProbeResult[];
+    try {
+      results = await probeAllWillingness(this._llm, agents, { topic: this.topic, staticContext: this.staticContext, messages: this._messages, triggerMessage: trigger, isMentioned: (member) => mentioned.has(member.id) }, { threshold: this._willingnessCfg.threshold, timeoutMs: this._willingnessCfg.timeoutMs, maxTokens: this._willingnessCfg.maxTokens, signal: signal ?? undefined });
+    } catch { return null; }
+    const threshold = this._willingnessCfg.threshold;
+    const viable = results.filter((r) => r.parseOk && r.willingness >= threshold);
+    const payload = { round, results: results.map((r) => ({ memberId: r.memberId, memberName: r.memberName, category: agents.find((a) => a.id === r.memberId)?.category, willingness: r.parseOk ? r.willingness : 0, confidence: r.confidence, reason: r.reason, wouldMention: r.wouldMention, parseOk: r.parseOk })), chosenId: null as string | null, fallback: viable.length === 0, threshold } as const;
+    if (viable.length === 0) { this._emit({ type: "willingness_probe", data: payload }); return null; }
+    const now = this._now();
+    const scoreMap = new Map(this._scheduler.computeScores(now).map((c) => [c.member.id, c.total] as const));
+    viable.sort((a, b) => {
+      const d = b.willingness - a.willingness;
+      if (Math.abs(d) >= 0.05) return d;
+      const sa = scoreMap.get(a.memberId) ?? 0;
+      const sb = scoreMap.get(b.memberId) ?? 0;
+      if (sb !== sa) return sb - sa;
+      return a.memberId.localeCompare(b.memberId);
+    });
+    const chosen = viable[0]!;
+    (payload as unknown as { chosenId: string | null }).chosenId = chosen.memberId;
+    this._emit({ type: "willingness_probe", data: payload });
+    return agents.find((a) => a.id === chosen.memberId) ?? null;
   }
 
   /** 让某位 Agent 发言：发言权分配（speaker）→ 思考 → 生成 → 上屏（chat_message）。 */
@@ -558,14 +638,23 @@ export class ChatSession {
     if (this._vectorContext) {
       await this._vectorContext.trackText(record.id, stripSelfRating(streamed));
     }
-    // 工单 04：先用原文（含自评行）做共识检测，再剥离自评行上屏
-    const evalResult = this._detector.evaluate(record);
-    if (evalResult.warned && !evalResult.triggered && !this._consensusWarned) {
-      this._consensusWarned = true;
-      this._emit({
-        type: "consensus",
-        data: { level: evalResult.level, message: "讨论接近共识，可补充意见后即将收束", signals: evalResult.signals },
-      });
+    let evalResult: { level: number; signals: string[]; streak: number; triggered: boolean; warned: boolean; reason?: string; unresolved?: string[]; dissent_members?: any[] };
+    if (this._useLLMConsensus) {
+      (this._detector as LLMConsensusDetector).updateContext(this.topic, this.members);
+      const llmRes = await (this._detector as LLMConsensusDetector).evaluate(record);
+      evalResult = llmRes;
+      if (llmRes.warned && !llmRes.triggered && !this._consensusWarned) {
+        this._consensusWarned = true;
+        const msg = llmRes.unresolved && llmRes.unresolved.length ? "讨论接近共识，待解分歧：" + llmRes.unresolved.join("；") + "，可补充意见后即将收束" : "讨论接近共识，可补充意见后即将收束";
+        this._emit({ type: "consensus", data: { level: llmRes.level, message: msg, signals: llmRes.signals } });
+      }
+    } else {
+      const ruleRes = (this._detector as ConsensusDetector).evaluate(record);
+      evalResult = ruleRes;
+      if (ruleRes.warned && !ruleRes.triggered && !this._consensusWarned) {
+        this._consensusWarned = true;
+        this._emit({ type: "consensus", data: { level: ruleRes.level, message: "讨论接近共识，可补充意见后即将收束", signals: ruleRes.signals } });
+      }
     }
     record.content = stripSelfRating(streamed);
     this._messages.push(record);
