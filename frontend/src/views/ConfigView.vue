@@ -284,7 +284,7 @@
                   effect="light"
                   style="margin-left: 8px"
                 >
-                  {{ m.recommended_for.map(t => ({text:'正文',structure:'结构',check:'校验'}[t] || t)).join('/') }}推荐
+                  {{ m.recommended_for.map(t => ({text:'正文生成',structure:'结构',check:'校验'}[t] || t)).join('/') }}推荐
                 </el-tag>
               </el-option>
             </el-select>
@@ -402,13 +402,13 @@ interface StateSlot {
 }
 
 const stateSlots: StateSlot[] = [
-  { key: 'ideation', label: '创意孵化', taskLabel: '文本生成', desc: 'Agent 在创意孵化状态下对话与头脑风暴使用的模型' },
-  { key: 'worldview', label: '世界观', taskLabel: '结构化输出', desc: '世界观设定生成与 Agent 在该状态的对话模型' },
-  { key: 'characters', label: '人物', taskLabel: '结构化输出', desc: '人物卡生成与 Agent 在该状态的对话模型' },
-  { key: 'outline', label: '章纲', taskLabel: '结构化输出', desc: '章纲生成与 Agent 在该状态的对话模型' },
-  { key: 'writing', label: '正文', taskLabel: '文本生成', desc: '正文写作/改写与 Agent 在该状态的对话模型' },
-  { key: 'review', label: '审阅', taskLabel: '检查校验', desc: '章节审阅与 Agent 在该状态的对话模型' },
-  { key: 'foreshadow', label: '伏笔管理', taskLabel: '文本生成', desc: '伏笔管理状态下 Agent 的对话模型' },
+  { key: 'ideation', label: '灵感捕捉', taskLabel: '文本生成', desc: 'Agent 在灵感捕捉状态下对话与头脑风暴使用的模型' },
+  { key: 'worldview', label: '世界观构建', taskLabel: '结构化输出', desc: '世界观构建设定生成与 Agent 在该状态的对话模型' },
+  { key: 'characters', label: '人物塑造', taskLabel: '结构化输出', desc: '人物塑造卡生成与 Agent 在该状态的对话模型' },
+  { key: 'outline', label: '大纲生成', taskLabel: '结构化输出', desc: '大纲生成生成与 Agent 在该状态的对话模型' },
+  { key: 'writing', label: '正文生成', taskLabel: '文本生成', desc: '正文生成写作/改写与 Agent 在该状态的对话模型' },
+  { key: 'review', label: '质量审查', taskLabel: '检查校验', desc: '章节质量审查与 Agent 在该状态的对话模型' },
+  { key: 'foreshadow', label: '文风优化', taskLabel: '文本生成', desc: '文风优化状态下 Agent 的对话模型' },
 ]
 
 const assignmentMap = reactive<Record<string, string>>(
@@ -832,7 +832,7 @@ onMounted(() => {
 /* ====== 页头 ====== */
 .page-header :deep(.el-card__body) {
   padding: 20px 24px;
-  background: linear-gradient(135deg, #f5f9ff 0%, #ffffff 60%);
+  background: linear-gradient(135deg, #eef2ff 0%, #ffffff 60%);
 }
 
 .header-content {
@@ -1033,11 +1033,11 @@ onMounted(() => {
 }
 
 .stripe-text {
-  background: linear-gradient(90deg, #409eff 0%, #6f8cff 100%);
+  background: linear-gradient(90deg, #6366f1 0%, #6f8cff 100%);
 }
 
 .stripe-structure {
-  background: linear-gradient(90deg, #67c23a 0%, #85d667 100%);
+  background: linear-gradient(90deg, #10b981 0%, #85d667 100%);
 }
 
 .stripe-check {
@@ -1071,12 +1071,12 @@ onMounted(() => {
 }
 
 .icon-text {
-  background: linear-gradient(135deg, #409eff 0%, #6f8cff 100%);
-  box-shadow: 0 4px 10px rgba(64, 158, 255, 0.3);
+  background: linear-gradient(135deg, #6366f1 0%, #6f8cff 100%);
+  box-shadow: 0 4px 10px rgba(99, 102, 241, 0.3);
 }
 
 .icon-structure {
-  background: linear-gradient(135deg, #67c23a 0%, #85d667 100%);
+  background: linear-gradient(135deg, #10b981 0%, #85d667 100%);
   box-shadow: 0 4px 10px rgba(103, 194, 58, 0.3);
 }
 
@@ -1176,21 +1176,21 @@ onMounted(() => {
 </style>
 
 /* ====== 按状态配色 ====== */
-.stripe-ideation { background: linear-gradient(90deg, #4f8cff 0%, #6f8cff 100%); }
-.stripe-worldview { background: linear-gradient(90deg, #36d1dc 0%, #5b86e5 100%); }
-.stripe-characters { background: linear-gradient(90deg, #00b578 0%, #67c23a 100%); }
+.stripe-ideation { background: linear-gradient(90deg, #6366f1 0%, #6f8cff 100%); }
+.stripe-worldview { background: linear-gradient(90deg, #06b6d4 0%, #5b86e5 100%); }
+.stripe-characters { background: linear-gradient(90deg, #00b578 0%, #10b981 100%); }
 .stripe-outline { background: linear-gradient(90deg, #ff9f43 0%, #ffd200 100%); }
 .stripe-writing { background: linear-gradient(90deg, #eb5757 0%, #f7971e 100%); }
-.stripe-review { background: linear-gradient(90deg, #f5222d 0%, #c86dd7 100%); }
-.stripe-foreshadow { background: linear-gradient(90deg, #722ed1 0%, #6f5cff 100%); }
+.stripe-review { background: linear-gradient(90deg, #ef4444 0%, #c86dd7 100%); }
+.stripe-foreshadow { background: linear-gradient(90deg, #722ed1 0%, #4f46e5 100%); }
 
-.icon-ideation { background: linear-gradient(135deg, #4f8cff 0%, #6f5cff 100%); box-shadow: 0 4px 10px rgba(79, 140, 255, 0.3); }
-.icon-worldview { background: linear-gradient(135deg, #36d1dc 0%, #5b86e5 100%); box-shadow: 0 4px 10px rgba(54, 209, 220, 0.3); }
-.icon-characters { background: linear-gradient(135deg, #00b578 0%, #67c23a 100%); box-shadow: 0 4px 10px rgba(0, 181, 120, 0.3); }
+.icon-ideation { background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); box-shadow: 0 4px 10px rgba(99, 102, 241, 0.3); }
+.icon-worldview { background: linear-gradient(135deg, #06b6d4 0%, #5b86e5 100%); box-shadow: 0 4px 10px rgba(54, 209, 220, 0.3); }
+.icon-characters { background: linear-gradient(135deg, #00b578 0%, #10b981 100%); box-shadow: 0 4px 10px rgba(0, 181, 120, 0.3); }
 .icon-outline { background: linear-gradient(135deg, #ff9f43 0%, #ffd200 100%); box-shadow: 0 4px 10px rgba(255, 159, 67, 0.3); }
 .icon-writing { background: linear-gradient(135deg, #eb5757 0%, #f7971e 100%); box-shadow: 0 4px 10px rgba(235, 87, 87, 0.3); }
-.icon-review { background: linear-gradient(135deg, #f5222d 0%, #c86dd7 100%); box-shadow: 0 4px 10px rgba(245, 34, 45, 0.3); }
-.icon-foreshadow { background: linear-gradient(135deg, #722ed1 0%, #6f5cff 100%); box-shadow: 0 4px 10px rgba(114, 46, 209, 0.3); }
+.icon-review { background: linear-gradient(135deg, #ef4444 0%, #c86dd7 100%); box-shadow: 0 4px 10px rgba(245, 34, 45, 0.3); }
+.icon-foreshadow { background: linear-gradient(135deg, #722ed1 0%, #4f46e5 100%); box-shadow: 0 4px 10px rgba(114, 46, 209, 0.3); }
 
 .section-hint {
   font-size: 12px;

@@ -1,7 +1,8 @@
-﻿/** 工作流路由（TS 版）：设定生成 / 正文四步 / 选段修改 / 审阅五步。 */
+/** 工作流路由（TS 版）：设定生成 / 正文四步 / 选段修改 / 审阅五步。 */
 import type { FastifyInstance } from "fastify";
 import { getProjectStore, getClientForState } from "../state.js";
 import { SettingsStore } from "../../storage/settings_store.js";
+import { StructuredSettingsStore } from "../../storage/structured_settings.js";
 import { MemoryStore } from "../../storage/memory_store.js";
 import { ChapterStore, prereqCheck, writeChapterFlow, rewriteSelectionFlow, applyRewriteFlow } from "../../workflow/chapters.js";
 import { reviewChapterFlow, applyReviewSuggestion, markReviewed } from "../../workflow/review.js";
@@ -38,13 +39,14 @@ export async function workflowRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
     }
     const settings = new SettingsStore(store());
+    const structured = new StructuredSettingsStore(store());
     try {
       const settingType = req.body?.setting_type ?? "all";
       if (settingType === "all") {
-        const results = await generateAll(client, settings, project);
+        const results = await generateAll(client, settings, project, structured);
         return { success: true, settings: results };
       }
-      const data = await new SettingsGenerator(client, settings).generate(project, settingType);
+      const data = await new SettingsGenerator(client, settings, structured).generate(project, settingType);
       return { success: true, settings: { [settingType]: data } };
     } catch (err) {
       return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
@@ -198,3 +200,4 @@ export async function workflowRoutes(app: FastifyInstance): Promise<void> {
     return result;
   });
 }
+

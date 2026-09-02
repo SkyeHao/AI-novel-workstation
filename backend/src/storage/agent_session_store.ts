@@ -22,6 +22,24 @@ export interface AgentSessionMeta {
   message_count: number;
 }
 
+/** 会话运行阶段（用于跨重启恢复 UI 状态） */
+export type AgentSessionPhase = "idle" | "streaming" | "awaiting_ask";
+
+/** ask_user 提问（与 react.ts AskQuestion 形状一致，避免存储层依赖 agent 层） */
+export interface AgentAskState {
+  question: string;
+  options: string[];
+  multiple: boolean;
+  allow_custom: boolean;
+}
+
+/** 会话状态快照（独立文件，重启后仍可恢复"停在等待作者回答"） */
+export interface AgentSessionPhaseState {
+  phase: AgentSessionPhase;
+  ask: AgentAskState | null;
+  updated_at: string;
+}
+
 interface SessionIndexFile {
   sessions: AgentSessionMeta[];
 }
@@ -43,6 +61,10 @@ export class AgentSessionStore {
 
   private _sessionFile(projectId: string, sessionId: string): string {
     return path.join(this.sessionsDir(projectId), `${sessionId}.jsonl`);
+  }
+
+  private _stateFile(projectId: string, sessionId: string): string {
+    return path.join(this.sessionsDir(projectId), `${sessionId}.state.json`);
   }
 
   private _legacyChatFile(projectId: string): string {
@@ -144,10 +166,46 @@ export class AgentSessionStore {
     try {
       const f = this._sessionFile(projectId, sessionId);
       if (fs.existsSync(f)) fs.unlinkSync(f);
+      const sf = this._stateFile(projectId, sessionId);
+      if (fs.existsSync(sf)) fs.unlinkSync(sf);
     } catch (err) {
       console.warn(`删除会话文件失败: ${err}`);
     }
     return true;
+  }
+
+  /** 读取会话阶段状态（不存在返回 null） */
+  getPhaseState(projectId: string, sessionId: string): AgentSessionPhaseState | null {
+    const p = this._stateFile(projectId, sessionId);
+    if (!fs.existsSync(p)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(p, "utf-8")) as AgentSessionPhaseState;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 写入会话阶段状态（updated_at 由内部生成，统一格式） */
+  setPhaseState(projectId: string, sessionId: string, patch: { phase: AgentSessionPhase; ask?: AgentAskState | null }): void {
+    if (!sessionId) return;
+    const dir = this.sessionsDir(projectId);
+    fs.mkdirSync(dir, { recursive: true });
+    const state: AgentSessionPhaseState = {
+      phase: patch.phase,
+      ask: patch.ask ?? null,
+      updated_at: nowSeconds(),
+    };
+    fs.writeFileSync(this._stateFile(projectId, sessionId), JSON.stringify(state, null, 2), "utf-8");
+  }
+
+  /** 删除会话阶段状态文件 */
+  clearPhaseState(projectId: string, sessionId: string): void {
+    try {
+      const p = this._stateFile(projectId, sessionId);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch {
+      /* 忽略 */
+    }
   }
 
   loadMessages(projectId: string, sessionId: string): Array<Record<string, unknown>> {

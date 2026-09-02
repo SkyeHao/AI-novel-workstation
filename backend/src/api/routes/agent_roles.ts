@@ -39,14 +39,12 @@ export async function agentRolesRoutes(app: FastifyInstance): Promise<void> {
       name: String(body.name),
       description: String(body.description),
       category: body.category as "proposer" | "synthesizer" | "reviewer",
+      scenario: Array.isArray(body.scenario) ? (body.scenario as AgentRoleAsset["scenario"]) : ["general"],
+      modelId: body.modelId != null ? String(body.modelId) : null,
       systemPrompt: String(body.systemPrompt),
       promptVariables: body.promptVariables as string[] | undefined,
-      modelConfig: body.modelConfig ?? {
-        mode: "reference",
-      },
       contextConfig: body.contextConfig ?? {
         sharedContextKeys: [],
-        roleFocusHint: "",
       },
     });
     return role;

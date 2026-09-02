@@ -1,8 +1,8 @@
-﻿<template>
+<template>
   <div class="panel-page">
     <div class="page-head">
       <div>
-        <h2 class="page-title">世界观设定</h2>
+        <h2 class="page-title">世界观构建设定</h2>
         <p class="page-subtitle">时代 / 规则 / 地理 / 阵营 / 历史（状态：worldview）</p>
       </div>
       <el-button type="primary" :loading="generating" @click="generate">基于核心要素生成</el-button>

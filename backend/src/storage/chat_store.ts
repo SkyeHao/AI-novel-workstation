@@ -16,13 +16,57 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ProjectStore } from "./project_store.js";
-import type { ChatSessionSnapshot } from "../workflow/chat_session.js";
+import type { ChatMember, ChatSessionSnapshot } from "../workflow/chat_session.js";
 
 export interface ChatConsensusNode {
   level: number;
   message: string;
   signals?: string[];
   timestamp: string;
+}
+
+/** 等待作者回答的 ask_user 提问（持久化，供进程重启后恢复 ask 卡片）。 */
+export interface PendingAskRecord {
+  memberId: string;
+  memberName: string;
+  question: string;
+  options: string[];
+  multiple: boolean;
+  allow_custom: boolean;
+  timestamp: string;
+}
+
+/** 会话运行时配置（可序列化，供进程重启后从磁盘重建会话继续讨论）。
+ *  不含 LLM client——恢复时由路由按任务分配重新创建。 */
+export interface ChatSessionRuntimeConfig {
+  projectId: string;
+  topic: string;
+  members: ChatMember[];
+  staticContext: Record<string, string>;
+  maxRounds: number;
+  maxToolCalls: number;
+  context?: { maxTokens?: number };
+  consensus?: {
+    useLLM?: boolean;
+    llmJudge?: {
+      timeoutMs?: number;
+      modelTemperature?: number;
+      maxTokens?: number | null;
+      /** 共识裁判角色卡片的模型 id（恢复时据此重建专属 client） */
+      modelId?: string | null;
+      /** 共识裁判角色卡片的系统提示词 */
+      systemPrompt?: string;
+    };
+  };
+  schedulerAgent?: {
+    enabled?: boolean;
+    modelId?: string | null;
+    timeoutMs?: number;
+    maxTokens?: number;
+    temperature?: number;
+    /** 导演角色卡片的系统提示词 */
+    systemPrompt?: string;
+  };
 }
 
 export interface ChatStore {
@@ -36,6 +80,14 @@ export interface ChatStore {
   setSummary(projectId: string, sessionId: string, summary: string): void;
   /** 更新会话状态。 */
   setStatus(projectId: string, sessionId: string, status: ChatSessionSnapshot["status"]): void;
+  /** 持久化等待作者回答的 ask（null 表示清除）。 */
+  setPendingAsk(projectId: string, sessionId: string, pending: PendingAskRecord | null): void;
+  /** 读取持久化的等待作者回答的 ask；无则返回 null。 */
+  getPendingAsk(projectId: string, sessionId: string): PendingAskRecord | null;
+  /** 持久化会话运行时配置（进程重启后恢复用）。 */
+  saveConfig(projectId: string, sessionId: string, config: ChatSessionRuntimeConfig): void;
+  /** 读取会话运行时配置；无则返回 null。 */
+  loadConfig(projectId: string, sessionId: string): ChatSessionRuntimeConfig | null;
   /** 加载完整会话（含共识 / 最终方案），不存在返回 null。 */
   load(projectId: string, sessionId: string): ChatSessionSnapshot | null;
   /** 项目内会话列表（按 updatedAt 倒序）。 */
@@ -62,6 +114,14 @@ export class FileChatStore implements ChatStore {
 
   private _consensusFile(projectId: string, sessionId: string): string {
     return path.join(this._dir(projectId), sessionId + ".consensus.json");
+  }
+
+  private _askFile(projectId: string, sessionId: string): string {
+    return path.join(this._dir(projectId), sessionId + ".ask.json");
+  }
+
+  private _configFile(projectId: string, sessionId: string): string {
+    return path.join(this._dir(projectId), sessionId + ".config.json");
   }
 
   private _read<T>(file: string): T | null {
@@ -143,6 +203,31 @@ export class FileChatStore implements ChatStore {
     this._write(this._recordFile(projectId, sessionId), record);
   }
 
+  setPendingAsk(projectId: string, sessionId: string, pending: PendingAskRecord | null): void {
+    const file = this._askFile(projectId, sessionId);
+    if (!pending) {
+      try {
+        if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+      } catch (err) {
+        console.warn("清除待答 ask 失败: " + file + " " + String(err));
+      }
+      return;
+    }
+    this._write(file, pending);
+  }
+
+  getPendingAsk(projectId: string, sessionId: string): PendingAskRecord | null {
+    return this._read<PendingAskRecord>(this._askFile(projectId, sessionId));
+  }
+
+  saveConfig(projectId: string, sessionId: string, config: ChatSessionRuntimeConfig): void {
+    this._write(this._configFile(projectId, sessionId), config);
+  }
+
+  loadConfig(projectId: string, sessionId: string): ChatSessionRuntimeConfig | null {
+    return this._read<ChatSessionRuntimeConfig>(this._configFile(projectId, sessionId));
+  }
+
   load(projectId: string, sessionId: string): ChatSessionSnapshot | null {
     const record = this._read<ChatSessionSnapshot>(this._recordFile(projectId, sessionId));
     if (!record) return null;
@@ -188,6 +273,10 @@ export class FileChatStore implements ChatStore {
       }
       const consensus = this._consensusFile(projectId, sessionId);
       if (fs.existsSync(consensus)) fs.rmSync(consensus, { force: true });
+      const ask = this._askFile(projectId, sessionId);
+      if (fs.existsSync(ask)) fs.rmSync(ask, { force: true });
+      const cfg = this._configFile(projectId, sessionId);
+      if (fs.existsSync(cfg)) fs.rmSync(cfg, { force: true });
     } catch (err) {
       console.warn("删除讨论记录失败: " + String(err));
     }

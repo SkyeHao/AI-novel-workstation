@@ -27,10 +27,45 @@ export interface AskQuestion {
   allow_custom: boolean;
 }
 
+/** ask 被中断时 resolve 的哨兵值：调用方据此中止本轮而不记录“作者的选择” */
+export const ASK_ABORTED_SENTINEL = "__AGENT_ASK_ABORTED__";
+
+/**
+ * 自定义回答选项的标记文案：前端识别它打开自定义输入，而不是作为普通选项提交。
+ * 无论 Agent 是否提供，ask 卡片都会在选项末尾追加该项，保证作者始终有可自由输入的入口。
+ */
+export const ASK_CUSTOM_OPTION = "✏️ 自定义回答…";
+
+/** Agent 未提供足够候选时的兜底选项，保证作者始终有多个可点选项（工单 14：禁止裸输入） */
+export const ASK_FALLBACK_OPTIONS = ["按你的建议执行", "换个方向再讨论"];
+
+/**
+ * 归一化 ask 选项：过滤空值/去重标记项，不足 2 个时用兜底选项补足，末尾追加“自定义回答”选项。
+ * 保证任何 ask_user 提问都有几个可选择的候选 + 一个可直接输入的入口。
+ */
+export function normalizeAskOptions(options: string[]): string[] {
+  const filtered = (options ?? [])
+    .map((s) => String(s).trim())
+    .filter((s) => s && s !== ASK_CUSTOM_OPTION);
+  let out = filtered.slice(0, 6);
+  if (out.length === 0) out = [...ASK_FALLBACK_OPTIONS];
+  else if (out.length === 1) out = [out[0]!, ASK_FALLBACK_OPTIONS[0]!];
+  if (!out.includes(ASK_CUSTOM_OPTION)) out = [...out, ASK_CUSTOM_OPTION];
+  return out;
+}
+
+/** 用户手动中断 Agent 执行 */
+export class AgentAbortError extends Error {
+  constructor() {
+    super("Agent 执行被用户中断");
+    this.name = "AgentAbortError";
+  }
+}
+
 /** 等待作者回答的解析器（配合 ask_user 工具） */
 export class AskResolver {
-  /** ask_user 等待超时（秒） */
-  static readonly ASK_TIMEOUT_SECONDS = Number(process.env.AGENT_ASK_TIMEOUT) || 300;
+  /** ask_user 等待超时（秒）；0 表示不超时，作者可无限期保持 ask 等待，之后重新打开会话仍可继续作答。可通过 AGENT_ASK_TIMEOUT 覆盖。 */
+  static readonly ASK_TIMEOUT_SECONDS = Number(process.env.AGENT_ASK_TIMEOUT) || 0;
   static readonly TIMEOUT_MSG = "作者超时未回答，请给出合理默认方向并继续推进";
   private _pending: {
     question: AskQuestion;
@@ -55,14 +90,24 @@ export class AskResolver {
       clearTimeout(this._pending.timeout);
     }
     return new Promise<string>((resolve) => {
-      this._pending = {
-        question: { question, options, multiple, allow_custom: allowCustom },
+      const pending: NonNullable<typeof this._pending> = {
+        // 工单 14：无论 Agent 怎么传，选项始终归一化——保证有几个候选 + 一个自定义回答入口
+        question: {
+          question,
+          options: normalizeAskOptions(options),
+          multiple,
+          allow_custom: true,
+        },
         resolve,
-        timeout: setTimeout(() => {
+      };
+      // 默认不设超时：作者未作答则一直保持 ask 状态。只有显式配置 AGENT_ASK_TIMEOUT>0 时才启用超时默认方向。
+      if (AskResolver.ASK_TIMEOUT_SECONDS > 0) {
+        pending.timeout = setTimeout(() => {
           this._pending = null;
           resolve(AskResolver.TIMEOUT_MSG);
-        }, AskResolver.ASK_TIMEOUT_SECONDS * 1000) as unknown as NodeJS.Timeout,
-      };
+        }, AskResolver.ASK_TIMEOUT_SECONDS * 1000) as unknown as NodeJS.Timeout;
+      }
+      this._pending = pending;
       if (this._onAsk) this._onAsk(this._pending!.question);
     });
   }
@@ -74,6 +119,15 @@ export class AskResolver {
     if (p.timeout) clearTimeout(p.timeout);
     p.resolve(answer);
     return true;
+  }
+
+  /** 中断时释放等待中的 ask（resolve 哨兵值，调用方据此中止本轮） */
+  abort(): void {
+    if (!this._pending) return;
+    const p = this._pending;
+    this._pending = null;
+    if (p.timeout) clearTimeout(p.timeout);
+    p.resolve(ASK_ABORTED_SENTINEL);
   }
 }
 
@@ -132,6 +186,7 @@ export class ReActAgent {
   max_output_tokens: number | null;
   tool_call_mode: ToolCallMode;
   ask_resolver: AskResolver;
+  on_ask_pending?: () => void | Promise<void>;
 
   constructor(init: {
     client: LLMClient;
@@ -143,6 +198,7 @@ export class ReActAgent {
     max_output_tokens?: number | null;
     tool_call_mode?: ToolCallMode;
     ask_resolver?: AskResolver;
+    on_ask_pending?: () => void | Promise<void>;
   }) {
     this.client = init.client;
     this.tool_manager = init.tool_manager;
@@ -154,6 +210,7 @@ export class ReActAgent {
     const mode = init.tool_call_mode ?? "native";
     this.tool_call_mode = ["native", "jsonfc", "dsml", "auto"].includes(mode) ? mode : "native";
     this.ask_resolver = init.ask_resolver ?? new AskResolver();
+    this.on_ask_pending = init.on_ask_pending;
     this.messages = [new ChatMessage(Role.SYSTEM, this.system_prompt)];
   }
 
@@ -181,8 +238,10 @@ export class ReActAgent {
       on_stream?: (text: string) => void | Promise<void>;
       on_thinking?: (text: string) => void | Promise<void>;
       on_ask?: (q: AskQuestion) => void;
-    } = {}
+    } = {},
+    signal?: AbortSignal
   ): Promise<AgentTurnResult> {
+    if (signal?.aborted) throw new AgentAbortError();
     this.messages.push(new ChatMessage(Role.USER, userInput));
     const steps: AgentStep[] = [];
     let total_tokens = 0;
@@ -199,6 +258,7 @@ export class ReActAgent {
     let content = "";
     let protocolFailStreak = 0;
     for (let iter = 0; iter < this.max_iterations; iter++) {
+      if (signal?.aborted) throw new AgentAbortError();
       // ---------------- LLM 调用（流式） ----------------
       content = "";
       let finishReason = "";
@@ -230,7 +290,8 @@ export class ReActAgent {
               nativeFc.arguments += fc.arguments;
             }
           }
-        }
+        },
+        signal
       );
 
       try {
@@ -269,6 +330,7 @@ export class ReActAgent {
           }
         }
       } catch (err) {
+        if (signal?.aborted) throw new AgentAbortError();
         throw err;
       }
 
@@ -288,6 +350,7 @@ export class ReActAgent {
           const { thought, tool_call, done } = parsed;
           if (done && !tool_call) {
             const clean = stripJsonfc(content) || thought;
+            this.messages.push(new ChatMessage(Role.ASSISTANT, content));
             await _emit({ thought, tool_name: "", tool_args: {}, observation: "", is_final: true });
             return { reply: clean, steps, is_done: true, token_count: total_tokens };
           }
@@ -296,6 +359,7 @@ export class ReActAgent {
             const toolArgs = parseJsonfcArgs(tool_call.arguments);
             const step = await this._executeTool({ thought: thought || "", toolName, toolArgs }, _emit);
             if (!step) continue;
+            if (signal?.aborted) throw new AgentAbortError();
             continue;
           }
           // done=false 且无工具调用：协议要求继续
@@ -324,24 +388,57 @@ export class ReActAgent {
           await _emit({ thought: "⚠️ 协议 JSON 解析失败，正在要求模型修正重试…", tool_name: "", tool_args: {}, observation: "", is_final: false });
           continue;
         }
-        // 非协议文本：若为空白/无效内容，驱动模型重试，避免产出空白回复
+        // 非协议文本：若为空白/无效内容（含空 JSON {} / 空数组 []），驱动模型重试，避免产出空白回复
         const fallbackReply = stripJsonfc(content) || streamedText;
-        if (!fallbackReply.trim()) {
+        const trimmedReply = fallbackReply.trim();
+        const isBareJson = trimmedReply === "{}" || trimmedReply === "[]";
+        if (!trimmedReply || isBareJson) {
           protocolFailStreak++;
           if (protocolFailStreak >= 3) {
             const abortMsg = "⚠️ 模型连续多次返回无效协议内容，本轮已自动中止。请重新发送消息重试。";
             await _emit({ thought: abortMsg, tool_name: "", tool_args: {}, observation: "", is_final: true });
             return { reply: abortMsg, steps, is_done: false, token_count: total_tokens };
           }
-          this.messages.push(new ChatMessage(Role.ASSISTANT, content));
+          // 空白/畸形回复以可读占位写入历史，避免裸空 JSON（{"": ""} 等）残留在会话文件
+          this.messages.push(new ChatMessage(Role.ASSISTANT, "（模型返回了空白/无效协议内容，已提示重新输出）"));
           this.messages.push(
-            new ChatMessage(Role.USER, "你上一条回复没有实际内容。请重新输出一个合法、完整的协议 JSON（thought + tool_call 或 done=true）。")
+            new ChatMessage(Role.USER, "你上一条回复没有实际内容（返回了空 JSON {} / [] 或空白）。请重新输出一个合法、完整的协议 JSON（thought + tool_call 或 done=true）。")
           );
           await _emit({ thought: "⚠️ 检测到空白回复，要求模型重新输出…", tool_name: "", tool_args: {}, observation: "", is_final: false });
           continue;
         }
-        await _emit({ thought: fallbackReply, tool_name: "", tool_args: {}, observation: "", is_final: true });
-        return { reply: fallbackReply, steps, is_done: false, token_count: total_tokens };
+        // 模型偶尔输出非协议的普通 JSON 对象（如 {"文件路径":"内容" }），提取其中的字符串值作为可读回复
+        let readableReply = fallbackReply;
+        let parsedAsJsonObject = false;
+        try {
+          const maybeObj = JSON.parse(fallbackReply);
+          if (maybeObj && typeof maybeObj === "object" && !Array.isArray(maybeObj)) {
+            parsedAsJsonObject = true;
+            const textVal = Object.values(maybeObj).find((v): v is string => typeof v === "string" && v.trim() !== "");
+            if (textVal) readableReply = textVal;
+          }
+        } catch {
+          /* 非 JSON 文本，原样返回 */
+        }
+        // 返回的是 JSON 对象但提取不出可读文本（如 {"": 0} / {"key": 123}）：视为协议失败，驱动重试，避免把畸形 JSON 当最终回复展示给作者
+        if (parsedAsJsonObject && readableReply === fallbackReply) {
+          protocolFailStreak++;
+          if (protocolFailStreak >= 3) {
+            const abortMsg = "⚠️ 模型连续多次返回无效协议内容，本轮已自动中止。请重新发送消息重试。";
+            await _emit({ thought: abortMsg, tool_name: "", tool_args: {}, observation: "", is_final: true });
+            return { reply: abortMsg, steps, is_done: false, token_count: total_tokens };
+          }
+          this.messages.push(new ChatMessage(Role.ASSISTANT, "（模型返回了无效协议内容，已提示重新输出）"));
+          this.messages.push(
+            new ChatMessage(Role.USER, '你上一条回复没有包含可读文本或合法协议 JSON（期望 {"thought":...,"tool_call":...或null,"done":...}）。请重新输出一个合法、完整的协议 JSON。')
+          );
+          await _emit({ thought: "⚠️ 检测到无内容的 JSON 回复，要求模型重新输出…", tool_name: "", tool_args: {}, observation: "", is_final: false });
+          continue;
+        }
+        // 落盘一致性：把本次 assistant 回复写入消息历史，供上层持久化（否则会话文件缺失该回复）
+        this.messages.push(new ChatMessage(Role.ASSISTANT, content));
+        await _emit({ thought: readableReply, tool_name: "", tool_args: {}, observation: "", is_final: true });
+        return { reply: readableReply, steps, is_done: false, token_count: total_tokens };
       }
 
       // ---------------- 工具调用解析 ----------------
@@ -350,6 +447,7 @@ export class ReActAgent {
         const { name, args, thought } = toolCall;
         const step = await this._executeTool({ thought, toolName: name, toolArgs: args }, _emit);
         if (!step) continue;
+        if (signal?.aborted) throw new AgentAbortError();
         continue;
       }
 
@@ -368,10 +466,12 @@ export class ReActAgent {
         await _emit({ thought: "检测到动作承诺未执行，继续驱动…", tool_name: "", tool_args: {}, observation: "", is_final: false });
         continue;
       }
+      this.messages.push(new ChatMessage(Role.ASSISTANT, content));
       await _emit({ thought: replyText, tool_name: "", tool_args: {}, observation: "", is_final: true });
       return { reply: replyText, steps, is_done: false, token_count: total_tokens };
     }
 
+    if (content.trim()) this.messages.push(new ChatMessage(Role.ASSISTANT, content));
     const lastText = displayText(content ?? "");
     await _emit({ thought: lastText || "已达到最大迭代次数，结束本轮。", tool_name: "", tool_args: {}, observation: "", is_final: true });
     return { reply: lastText || "（达到最大迭代次数，未完成）", steps, is_done: false, token_count: total_tokens };
@@ -392,11 +492,15 @@ export class ReActAgent {
       const allowCustom = toBool(toolArgs.allow_custom);
       const step: AgentStep = { thought, tool_name: toolName, tool_args: toolArgs, observation: "", is_final: false };
       await _emit(step);
-      const answer = await this.ask_resolver.ask(question, opts, multiple, allowCustom);
-      const observation = `作者的选择：${answer}`;
-      step.observation = observation;
-      this.messages.push(new ChatMessage(Role.ASSISTANT, `调用 ask_user：${question}`));
-      this.messages.push(new ChatMessage(Role.USER, observation));
+      this.messages.push(new ChatMessage(Role.ASSISTANT, thought || `调用 ask_user：${question}`));
+      if (this.on_ask_pending) await this.on_ask_pending();
+     const answer = await this.ask_resolver.ask(question, opts, multiple, allowCustom);
+     if (answer === ASK_ABORTED_SENTINEL) throw new AgentAbortError();
+     const observation = `作者的选择：${answer}`;
+     step.observation = observation;
+     this.messages.push(new ChatMessage(Role.USER, observation));
+      // 作者回答后立即落盘（含“作者的选择”记录），前端重开/刷新时可还原紫色思考气泡与 ask_user 工具气泡
+      if (this.on_ask_pending) await this.on_ask_pending();
       return true;
     }
 
@@ -463,6 +567,18 @@ export class ReActAgent {
         return { name, args, thought: content.slice(0, m.index).trim() };
       }
     }
+    // jsonfc 协议 JSON 兜底：非 jsonfc 模式下模型仍可能按协议输出 JSON（受历史/习惯影响）。
+    // 识别出 tool_call 就执行，避免协议 JSON 被当作普通最终回复落盘，导致 ask_user 等工具永不执行（静默卡住）。
+    if (content.includes("{")) {
+      const parsed = parseJsonfc(content);
+      if (parsed && parsed.tool_call && parsed.tool_call.name) {
+        return {
+          name: parsed.tool_call.name,
+          args: parseJsonfcArgs(parsed.tool_call.arguments),
+          thought: parsed.thought || "",
+        };
+      }
+    }
     return null;
   }
 }
@@ -487,27 +603,105 @@ function displayThink(content: string): string {
   return content.trim();
 }
 
+/**
+ * 扫描一段 JSON 对象文本，返回指定顶层键的"所有出现"值（按出现顺序）。
+ * 模型有时会输出重复键的畸形 JSON（如两个 thought、两个 tool_call），
+ * JSON.parse 只会保留最后一个键值对，导致真实的 tool_call 被 null 覆盖。
+ * 这里手工扫描顶层键，逐个提取值，供调用方按"取第一个合法值"的策略处理。
+ */
+function topLevelFieldValues(json: string, key: string): unknown[] {
+  const values: unknown[] = [];
+  const n = json.length;
+  let depth = 0;
+  let i = 0;
+  while (i < n) {
+    const ch = json[i];
+    if (ch === '"') {
+      // 跳过完整字符串（含转义），若它处于顶层且紧跟冒号则视为键
+      let j = i + 1;
+      while (j < n) {
+        if (json[j] === "\\") { j += 2; continue; }
+        if (json[j] === '"') break;
+        j++;
+      }
+      const token = json.slice(i + 1, j);
+      let c = j + 1;
+      while (c < n && (json[c] === " " || json[c] === "\t" || json[c] === "\n" || json[c] === "\r")) c++;
+      if (depth === 1 && c < n && json[c] === ":" && token === key) {
+        let v = c + 1;
+        while (v < n && (json[v] === " " || json[v] === "\t" || json[v] === "\n" || json[v] === "\r")) v++;
+        const vEnd = scanJsonValueEnd(json, v);
+        if (vEnd > v) {
+          try { values.push(JSON.parse(json.slice(v, vEnd))); } catch { /* 单值解析失败则跳过 */ }
+        }
+        i = vEnd;
+        continue;
+      }
+      i = j + 1;
+      continue;
+    }
+    if (ch === "{" || ch === "[") { depth++; i++; continue; }
+    if (ch === "}" || ch === "]") { depth--; i++; continue; }
+    i++;
+  }
+  return values;
+}
+
+/** 返回从位置 v 开始的 JSON 值的结束位置（含结束字符），无法识别时返回 v。 */
+function scanJsonValueEnd(json: string, v: number): number {
+  const n = json.length;
+  const first = json[v];
+  if (first === "{" || first === "[") {
+    const close = first === "{" ? "}" : "]";
+    let d = 0;
+    let inStr = false;
+    for (let i = v; i < n; i++) {
+      const ch = json[i];
+      if (inStr) {
+        if (ch === "\\") { i++; continue; }
+        if (ch === '"') inStr = false;
+        continue;
+      }
+      if (ch === '"') { inStr = true; continue; }
+      if (ch === first) d++;
+      else if (ch === close) { d--; if (d === 0) return i + 1; }
+    }
+  } else if (first === '"') {
+    for (let i = v + 1; i < n; i++) {
+      const ch = json[i];
+      if (ch === "\\") { i++; continue; }
+      if (ch === '"') return i + 1;
+    }
+  } else {
+    let i = v;
+    while (i < n && !/[},\]\s]/.test(json[i])) i++;
+    return i;
+  }
+  return v;
+}
+
 function parseJsonfc(content: string): { thought: string; tool_call: { name: string; arguments: unknown } | null; done: boolean } | null {
   if (!content) return null;
-  try {
-    let start = content.indexOf("{");
-    let end = content.lastIndexOf("}");
-    if (start < 0 || end <= start) return null;
-    const data = JSON.parse(content.slice(start, end + 1)) as {
-      thought?: string;
-      tool_call?: { name?: string; arguments?: unknown } | null;
-      done?: boolean;
-    };
-    if (data.thought === undefined && !data.tool_call) return null;
-    if (data.tool_call && !data.tool_call.name) return null;
-    return {
-      thought: data.thought ?? "",
-      tool_call: data.tool_call ? { name: data.tool_call.name ?? "", arguments: data.tool_call.arguments ?? {} } : null,
-      done: Boolean(data.done),
-    };
-  } catch {
-    return null;
-  }
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  const json = content.slice(start, end + 1);
+
+ // 取"第一个合法值"：thought 取首个非空字符串，tool_call 取首个带 name 的对象，done 取首个布尔
+  // thought 容错：模型可能把 thought 误写成数字/布尔（如 {"thought": 0}），此时转字符串而非判定协议失败
+  const thoughtRaw = topLevelFieldValues(json, "thought").find(
+    (v): v is string | number | boolean => v !== null && v !== undefined && (typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+  );
+  const thought = thoughtRaw === undefined ? "" : String(thoughtRaw).trim();
+ const toolCallRaw = topLevelFieldValues(json, "tool_call").find(
+    (v): v is { name?: string; arguments?: unknown } => !!v && typeof v === "object" && !Array.isArray(v) && typeof (v as { name?: unknown }).name === "string"
+  );
+  const done = topLevelFieldValues(json, "done").find((v): v is boolean => typeof v === "boolean") ?? false;
+
+  const tool_call = toolCallRaw ? { name: toolCallRaw.name ?? "", arguments: toolCallRaw.arguments ?? {} } : null;
+  if (thought === "" && !tool_call) return null;
+  if (tool_call && !tool_call.name) return null;
+  return { thought, tool_call, done };
 }
 
 function stripJsonfc(content: string): string {
@@ -546,4 +740,3 @@ function normalizeList(value: unknown): string[] {
   }
   return [String(value)];
 }
-

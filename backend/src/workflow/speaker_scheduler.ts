@@ -43,7 +43,7 @@ export interface SpeakerSchedulerOptions {
   waitRatePerSec?: number;
   /** 话题相关性得分范围 [0,50]，默认 [0,50] */
   relevanceRange?: [number, number];
-  /** 角色特性加成表（category → 0~20），默认 proposer+8 / reviewer+12 / synthesizer+5 */
+  /** 角色特性加成表（category → 0~20），默认 proposer+8 / reviewer(挑刺者)+12 / synthesizer+5 */
   traitBonus?: Partial<Record<AgentRoleCategory, number>>;
   /** 随机函数（0..1），默认 Math.random；测试注入恒 0 使确定性 */
   random?: () => number;
@@ -128,6 +128,11 @@ export class SpeakerScheduler {
   /** @ 定向召唤：给指定成员一次性强加成（被选中或下次发言后清除）。 */
   mention(memberId: string): void {
     this._mentionBoost.set(memberId, this._opts.mentionBoost);
+  }
+
+  /** 是否存在待处理的 @ 召唤（导演调度前检查，实现「@ 后下轮归被 @ 者，不经导演」）。 */
+  hasMention(): boolean {
+    return this._mentionBoost.size > 0;
   }
 
   /** 更新最近消息文本（作者或 Agent 发言后调用），供话题相关性计算。 */

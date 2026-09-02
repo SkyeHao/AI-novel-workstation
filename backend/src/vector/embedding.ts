@@ -13,6 +13,8 @@
 const DEFAULT_MODEL = "Xenova/paraphrase-multilingual-MiniLM-L12-v2";
 const DEFAULT_DIMENSIONS = 384;
 
+import { getEmbeddingDir } from "../config/paths.js";
+
 export interface EmbeddingService {
   readonly modelName: string;
   readonly dimensions: number;
@@ -47,14 +49,16 @@ type ExtractorFn = (texts: string[] | string, options?: { pooling?: string; norm
 export class TransformersEmbeddingService implements EmbeddingService {
   readonly modelName: string;
   readonly dimensions: number;
+  /** 模型缓存目录（运行配置契约的可观察部分，测试用） */
+  readonly cacheDir: string;
   private _extractor: ExtractorFn | null = null;
-  private _cacheDir: string | undefined;
   private _loadTimeoutMs: number;
 
   constructor(options: EmbeddingServiceOptions = {}) {
     this.modelName = options.modelName ?? DEFAULT_MODEL;
     this.dimensions = options.dimensions ?? DEFAULT_DIMENSIONS;
-    this._cacheDir = options.cacheDir;
+    // 未显式指定时回退到配置目录 models/（桌面版经 AI_NOVEL_EMBEDDING_DIR 覆盖到内置资源目录）
+    this.cacheDir = options.cacheDir ?? getEmbeddingDir();
     this._loadTimeoutMs = options.loadTimeoutMs ?? 60000;
   }
 
@@ -63,7 +67,7 @@ export class TransformersEmbeddingService implements EmbeddingService {
     try {
       const mod = (await import("@xenova/transformers")) as TransformersModule;
       if (!mod.pipeline) return false;
-      if (mod.env && this._cacheDir) mod.env.cacheDir = this._cacheDir;
+      if (mod.env && this.cacheDir) mod.env.cacheDir = this.cacheDir;
       if (mod.env) mod.env.allowLocalModels = true;
       const pipeline = mod.pipeline.bind(mod);
       this._extractor = (await this._withTimeout(

@@ -1,4 +1,4 @@
-﻿/** 正文创作管线（ADR-0005 / T9）。
+/** 正文创作管线（ADR-0005 / T9）。
  * 正文四步：前置检测 → 组装上下文 → 写章落盘 → L1 摘要。
  * 章状态机：PENDING → GENERATED → REVIEWED/FINALIZED，修改回 GENERATED。 */
 import * as fs from "node:fs";
@@ -10,6 +10,7 @@ import type { MemoryStore } from "../storage/memory_store.js";
 import type { SettingsStore } from "../storage/settings_store.js";
 import { ContextOrchestrator } from "../agent/orchestrator.js";
 import { getStateNode } from "../storage/states.js";
+import { DynamicSettingsStore } from "../storage/dynamic_settings.js";
 
 export type ChapterStatus = "PENDING" | "GENERATED" | "REVIEWED" | "FINALIZED";
 
@@ -162,11 +163,13 @@ export async function writeChapterFlow(opts: {
 
   // 2 组装上下文（按 writing 状态规则）
   const retriever = await import("../storage/retriever.js").then((m) => m.createRetriever(memory));
+  const dynamicStore = new DynamicSettingsStore(projectStore);
   const orchestrator = new ContextOrchestrator(
     client,
     memory,
     retriever,
-    (pid, type) => (settingsStore.exists(pid, type) ? settingsStore.get(pid, type) : null)
+    (pid, type) => (settingsStore.exists(pid, type) ? settingsStore.get(pid, type) : null),
+    dynamicStore
   );
   const outline = settingsStore.exists(projectId, "outline") ? settingsStore.get(projectId, "outline") : null;
   const chapterHint = buildChapterHint(outline, no, opts.note ?? "");
@@ -181,7 +184,7 @@ export async function writeChapterFlow(opts: {
 
   // 3 写章落盘
   const response = await client.achat(assembled, { temperature: 0.8, max_tokens: 6000 });
-  const content = response.content.trim();
+  const content = stripChapterMeta(response.content.trim());
   const title = opts.title ?? `第 ${no} 章`;
   const store = new ChapterStore(projectStore);
   store.upsertChapter(projectId, no, title, content);
@@ -248,9 +251,26 @@ export const WRITING_SYSTEM_PROMPT = `你是一位成熟的网文作者。根据
 - 符合本书风格基调与节奏爽点，3章一小爽、10章一大爽
 - 注意人物性格一致性与对话口吻
 - 尊重已确定的正典事实，不得冲突；需要新增设定时先说明再写入
-- 章节结尾留钩子（除非是收束卷）
+- 章节结尾以正文叙事自然留钩子（除非是收束卷）
+- 正文只包含读者看到的内容：不得输出任何元信息、章末说明、"本章完/（第N章完）"等完本标注、钩子说明或与剧情无关的提示
 - 直接输出正文 Markdown（可含小节标题），不要输出任何解释`;
 
+/** 剥离正文末尾的完本标注（如"（第3章完）"、"本章完"、"（全书完）"），保证正文文件只含读者看到的内容。 */
+export function stripChapterMeta(content: string): string {
+  let lines = content.split(/\r?\n/);
+  const endMark = /^(?:（[^）]*完[^）]*）|（第?\s*\d*\s*章?\s*预告[^）]*）|第?\s*\d*\s*章\s*完|本章完|全书完|（完）|【章尾钩子】.*)$/;
+  while (lines.length > 0) {
+    const last = lines[lines.length - 1];
+    if (last === undefined) break;
+    const trimmed = last.trim();
+    if (trimmed === "" || endMark.test(trimmed)) {
+      lines.pop();
+    } else {
+      break;
+    }
+  }
+  return lines.join("\n");
+}
 export interface RewriteResult {
   success: boolean;
   original: string;

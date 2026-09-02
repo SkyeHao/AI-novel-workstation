@@ -128,7 +128,7 @@ const content = computed(() => props.content)
 }
 
 .markdown-body th {
-  background: #f5f7fa;
+  background: #f5f5f7;
   font-weight: 600;
 }
 

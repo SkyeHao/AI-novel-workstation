@@ -1,8 +1,8 @@
-﻿<template>
+<template>
   <div class="panel-page">
     <div class="page-head">
       <div>
-        <h2 class="page-title">伏笔管理</h2>
+        <h2 class="page-title">文风优化</h2>
         <p class="page-subtitle">横切状态：埋 / 收 / 兑现台账（默认关闭，可在工作台启用）</p>
       </div>
       <el-button type="primary" @click="addVisible = true">登记伏笔</el-button>

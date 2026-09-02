@@ -1,8 +1,13 @@
-﻿/** 配置管理路由（TS 版，迁移自 api/routes/config.py）。 */
+/** 配置管理路由（TS 版，迁移自 api/routes/config.py）。 */
 import type { FastifyInstance } from "fastify";
 import { getSearchConfig, setSearchConfig, listModels, createModel, updateModel, deleteModel, testModel, getAssignments, setAssignment, PROVIDERS, getProjectDirPath, setProjectDirPath } from "../state.js";
 import type { TaskType } from "../../llm/manager.js";
 import { DEFAULT_STATE_KEYS } from "../../storage/states.js";
+import { CHARACTER_STATE_TEMPLATES } from "../../assets/character_state_templates.js";
+import { WORLDVIEW_TEMPLATES } from "../../assets/worldview_templates.js";
+import { CHARACTER_TEMPLATES } from "../../assets/character_templates.js";
+import { OUTLINE_TEMPLATES } from "../../assets/outline_templates.js";
+import { STYLE_TEMPLATES } from "../../assets/style_templates.js";
 
 export async function configRoutes(app: FastifyInstance): Promise<void> {
   // ---- 模型池 ----
@@ -62,6 +67,21 @@ export async function configRoutes(app: FastifyInstance): Promise<void> {
   // ---- 服务商列表 ----
   app.get("/providers", async () => PROVIDERS);
 
+  // ---- 题材模板（人物状态维度） ----
+  app.get("/character-state-templates", async () => CHARACTER_STATE_TEMPLATES);
+
+  // ---- 世界观模板 ----
+  app.get("/worldview-templates", async () => WORLDVIEW_TEMPLATES);
+
+  // ---- 人物模板 ----
+  app.get("/character-templates", async () => CHARACTER_TEMPLATES);
+
+  // ---- 大纲模板 ----
+  app.get("/outline-templates", async () => OUTLINE_TEMPLATES);
+
+  // ---- 风格模板 ----
+  app.get("/style-templates", async () => STYLE_TEMPLATES);
+
   // ---- 项目目录 ----
   app.get("/project-dir", async () => {
     const dir = getProjectDirPath();
@@ -86,3 +106,10 @@ export async function configRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 }
+
+
+
+
+
+
+

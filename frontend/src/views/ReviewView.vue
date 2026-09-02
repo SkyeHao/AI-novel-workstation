@@ -2,8 +2,8 @@
   <div class="panel-page review-page">
     <div class="page-head">
       <div>
-        <h2 class="page-title">审阅与去 AI 味</h2>
-        <p class="page-subtitle">审阅报告 → 去AI味建议 → 对比应用 → 标记 REVIEWED（状态：review）</p>
+        <h2 class="page-title">质量审查与去 AI 味</h2>
+        <p class="page-subtitle">质量审查报告 → 去AI味建议 → 对比应用 → 标记 REVIEWED（状态：review）</p>
       </div>
     </div>
 
@@ -32,7 +32,7 @@
             <div class="card-head">
               <span>第 {{ currentNo }} 章</span>
               <el-button type="primary" size="small" :loading="reviewing" @click="doReview">
-                {{ result.report ? '重新审阅' : '开始审阅' }}
+                {{ result.report ? '重新质量审查' : '开始质量审查' }}
               </el-button>
             </div>
           </template>
@@ -41,7 +41,7 @@
 
           <div v-else-if="result.report">
             <el-collapse v-model="openPanels">
-              <el-collapse-item name="report" title="📄 审阅报告">
+              <el-collapse-item name="report" title="📄 质量审查报告">
                 <MarkdownView :content="result.report" />
               </el-collapse-item>
               <el-collapse-item name="suggestions" title="✂️ 去 AI 味建议（{{ result.suggestions.length }} 条）">
@@ -72,15 +72,15 @@
             <el-divider />
             <div class="approve-row">
               <el-button type="success" size="small" :loading="approving" :disabled="currentChapter?.status === 'REVIEWED'" @click="approve">
-                标记本章为已审阅（REVIEWED）
+                标记本章为已质量审查（REVIEWED）
               </el-button>
-              <el-tag v-if="currentChapter?.status === 'REVIEWED'" type="success">本章已完成审阅</el-tag>
+              <el-tag v-if="currentChapter?.status === 'REVIEWED'" type="success">本章已完成质量审查</el-tag>
             </div>
           </div>
 
-          <el-empty v-else description="选择章节后点击「开始审阅」" :image-size="70" />
+          <el-empty v-else description="选择章节后点击「开始质量审查」" :image-size="70" />
         </el-card>
-        <el-empty v-else description="选择要审阅的章节" :image-size="80" />
+        <el-empty v-else description="选择要质量审查的章节" :image-size="80" />
       </el-col>
     </el-row>
   </div>
@@ -107,7 +107,7 @@ const openPanels = ref(['report', 'suggestions'])
 const result = reactive<{ report: string; suggestions: ReviewSuggestion[] }>({ report: '', suggestions: [] })
 const applied = reactive<Set<string>>(new Set())
 
-const statusLabel = (s: string) => ({ PENDING: '待生成', GENERATED: '已生成', REVIEWED: '已审阅', FINALIZED: '已定稿' }[s] || s)
+const statusLabel = (s: string) => ({ PENDING: '待生成', GENERATED: '已生成', REVIEWED: '已质量审查', FINALIZED: '已定稿' }[s] || s)
 function statusTag(s: string): 'info' | 'success' | 'warning' | 'primary' {
   const map = { PENDING: 'info' as const, GENERATED: 'success' as const, REVIEWED: 'warning' as const, FINALIZED: 'primary' as const }
   return map[s as keyof typeof map] || 'info'
@@ -137,9 +137,9 @@ async function doReview() {
     }
     result.report = res.data.report
     result.suggestions = res.data.suggestions
-    ElMessage.success('审阅完成')
+    ElMessage.success('质量审查完成')
   } catch (err: any) {
-    ElMessage.error(err?.response?.data?.error || '审阅失败')
+    ElMessage.error(err?.response?.data?.error || '质量审查失败')
   } finally {
     reviewing.value = false
   }
@@ -202,8 +202,8 @@ onMounted(() => {
 .chapter-panel :deep(.el-card__body) { padding: 8px 12px 12px; }
 .chapter-list { max-height: calc(100vh - 260px); overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
 .chapter-item { padding: 9px 12px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
-.chapter-item:hover { background: #f5f7fa; }
-.chapter-item.active { background: #eef4ff; border-color: #4f8cff; }
+.chapter-item:hover { background: #f5f5f7; }
+.chapter-item.active { background: #eef2ff; border-color: #6366f1; }
 .ch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ch-status { flex-shrink: 0; }
 .card-head { display: flex; justify-content: space-between; align-items: center; }

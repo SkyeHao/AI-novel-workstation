@@ -1,0 +1,49 @@
+{
+  "name": "ai-novel-workstation-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI 小说工作站 Windows 桌面壳（Electron）",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder --win --x64",
+    "build:portable": "electron-builder --win portable --x64"
+  },
+  "build": {
+    "appId": "com.ai-novel.workstation",
+    "productName": "AI 小说工作站",
+    "directories": {
+      "buildResources": "build",
+      "output": "../dist"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "../backend/dist", "to": "backend/dist" },
+      { "from": "../backend/package.json", "to": "backend/package.json" },
+      { "from": "../backend/node_modules", "to": "backend/node_modules" },
+      { "from": "../frontend/dist", "to": "frontend/dist" },
+      { "from": "../resources/qdrant", "to": "resources/qdrant" },
+      { "from": "../resources/models", "to": "resources/models" },
+      { "from": "../data/.gitkeep", "to": "resources/initial-data/.gitkeep" }
+    ],
+    "win": {
+      "target": ["nsis", "portable"],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    },
+    "portable": {
+      "artifactName": "AI-Novel-Workstation-Portable-${version}.exe"
+    }
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  }
+}

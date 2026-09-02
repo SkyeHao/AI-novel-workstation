@@ -2,7 +2,7 @@
   <div class="panel-page writing-page">
     <div class="page-head">
       <div>
-        <h2 class="page-title">正文创作</h2>
+        <h2 class="page-title">正文生成创作</h2>
         <p class="page-subtitle">前置检测 → 上下文组装 → 写章落盘 → L1 摘要（状态：writing）</p>
       </div>
       <el-button
@@ -16,7 +16,7 @@
     </div>
 
     <el-alert v-if="!prereq.complete" type="warning" :closable="false" show-icon style="margin-bottom: 12px">
-      <template #title>前置设定不完整：{{ prereq.missing.join('、') }}，请先在世界观/人物/章纲/风格状态中补全</template>
+      <template #title>前置设定不完整：{{ prereq.missing.join('、') }}，请先在世界观构建/人物塑造/大纲生成/风格状态中补全</template>
     </el-alert>
 
     <el-row :gutter="16">
@@ -76,7 +76,7 @@
       </el-form>
       <template #footer>
         <el-button @click="writeVisible = false">取消</el-button>
-        <el-button type="primary" :loading="writing" @click="doWrite">生成正文</el-button>
+        <el-button type="primary" :loading="writing" @click="doWrite">生成正文生成</el-button>
       </template>
     </el-dialog>
 
@@ -87,7 +87,7 @@
           <el-input v-model="rewriteInstruction" type="textarea" :rows="3" placeholder="如：加快节奏、去掉AI味、加强冲突…" />
         </el-form-item>
         <el-form-item label="原文选段">
-          <div class="sel-box">{{ rewriteSelection || '（请在右侧正文中划选一段文字）' }}</div>
+          <div class="sel-box">{{ rewriteSelection || '（请在右侧正文生成中划选一段文字）' }}</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -147,7 +147,7 @@ const compareVisible = ref(false)
 const rewriteResult = reactive({ original: '', rewritten: '' })
 const applying = ref(false)
 
-const statusLabel = (s: string) => ({ PENDING: '待生成', GENERATED: '已生成', REVIEWED: '已审阅', FINALIZED: '已定稿' }[s] || s)
+const statusLabel = (s: string) => ({ PENDING: '待生成', GENERATED: '已生成', REVIEWED: '已质量审查', FINALIZED: '已定稿' }[s] || s)
 const statusTag = (s: string): 'info' | 'success' | 'warning' | 'primary' => (({ PENDING: 'info', GENERATED: 'success', REVIEWED: 'warning', FINALIZED: 'primary' }) as Record<string, 'info' | 'success' | 'warning' | 'primary'>)[s] || 'info'
 
 async function load() {
@@ -217,7 +217,7 @@ function openRewriteDialog() {
 
 async function doRewrite() {
   if (!rewriteSelection.value) {
-    ElMessage.warning('请先在正文中划选一段文字')
+    ElMessage.warning('请先在正文生成中划选一段文字')
     return
   }
   if (!rewriteInstruction.value.trim()) {
@@ -274,8 +274,8 @@ onMounted(() => {
   padding: 9px 12px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; margin-bottom: 6px;
   display: flex; align-items: center; gap: 8px;
 }
-.chapter-item:hover { background: #f5f7fa; }
-.chapter-item.active { background: #eef4ff; border-color: #4f8cff; }
+.chapter-item:hover { background: #f5f5f7; }
+.chapter-item.active { background: #eef2ff; border-color: #6366f1; }
 .ch-main { flex: 1; min-width: 0; }
 .ch-no { font-weight: 700; font-size: 13px; }
 .ch-title { font-size: 13px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -286,7 +286,7 @@ onMounted(() => {
   width: 100%; min-height: 66vh; border: none; outline: none; resize: vertical; font-size: 14px; line-height: 2;
   font-family: inherit; color: var(--text-primary);
 }
-.sel-box { background: #f5f7fa; border-radius: 8px; padding: 10px; max-height: 180px; overflow: auto; font-size: 13px; line-height: 1.8; white-space: pre-wrap; }
+.sel-box { background: #f5f5f7; border-radius: 8px; padding: 10px; max-height: 180px; overflow: auto; font-size: 13px; line-height: 1.8; white-space: pre-wrap; }
 .cmp-title { font-weight: 600; margin-bottom: 6px; }
 .cmp-box { border: 1px solid var(--border-color-light); border-radius: 8px; padding: 12px; max-height: 48vh; overflow: auto; font-size: 13px; line-height: 1.8; white-space: pre-wrap; }
 .cmp-box.orig { background: #fff5f5; }

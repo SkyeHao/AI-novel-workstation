@@ -92,7 +92,7 @@ export class ChatRequest {
   toApiParams(model: string): Record<string, unknown> {
     const kwargs: Record<string, unknown> = {
       model,
-      messages: this.messages.map((m) => m.toDict()),
+      messages: this._toApiMessages(),
       temperature: this.temperature,
       top_p: this.top_p,
       frequency_penalty: this.frequency_penalty,
@@ -101,10 +101,80 @@ export class ChatRequest {
     if (this.max_tokens != null) kwargs.max_tokens = this.max_tokens;
     if (this.stop != null) kwargs.stop = this.stop;
     if (this.seed != null) kwargs.seed = this.seed;
-    if (this.functions != null) kwargs.functions = this.functions;
-    if (this.function_call != null) kwargs.function_call = this.function_call;
+    // 仅出站转换：旧版 functions/function_call 协议转为新版 tools/tool_choice 协议。
+    // 内部历史与交互日志仍保持旧格式，各消费方（chat_session/react/orchestrator）零改动。
+    if (this.functions != null) {
+      kwargs.tools = this.functions.map((f) => ({ type: "function", function: f }));
+    }
+    if (this.function_call != null) {
+      if (typeof this.function_call === "string") {
+        kwargs.tool_choice = this.function_call;
+      } else {
+        const fn = this.function_call as { name?: string };
+        if (fn && fn.name) kwargs.tool_choice = { type: "function", function: { name: fn.name } };
+      }
+    }
     if (this.response_format != null) kwargs.response_format = this.response_format;
     return kwargs;
+  }
+
+  /** 仅出站转换：把内部旧协议消息（role=function / assistant.function_call）转换为新版 tools 协议。
+   * 新协议要求 assistant 的每条工具调用后必须紧跟同 id 的 role=tool 结果消息，
+   * 且 assistant/tool 消息不允许携带 name 字段。内部历史与日志保持旧格式不变。 */
+  private _toApiMessages(): Array<Record<string, unknown>> {
+    const out: Array<Record<string, unknown>> = [];
+    const pendingIds: string[] = [];
+    let toolSeq = 0;
+    let lastAssistantIdx = -1;
+    for (const m of this.messages) {
+      const d = m instanceof ChatMessage ? m.toDict() : (m as Record<string, unknown>);
+      const role = d.role as string;
+      if (role === Role.ASSISTANT && d.function_call && (d.function_call as { name?: string }).name) {
+        // 正规 function_call：生成唯一 tool_call id，assistant 携带 tool_calls
+        const id = "call_" + String(++toolSeq);
+        const fcName = (d.function_call as { name: string }).name;
+        let fcArgs = (d.function_call as { arguments?: unknown }).arguments;
+        if (typeof fcArgs !== "string") fcArgs = JSON.stringify(fcArgs ?? {});
+        out.push({
+          role: "assistant",
+          content: String(d.content ?? ""),
+          tool_calls: [{ id, type: "function", function: { name: fcName, arguments: fcArgs } }],
+        });
+        pendingIds.push(id);
+        lastAssistantIdx = out.length - 1;
+      } else if (role === Role.ASSISTANT) {
+        out.push({ role: "assistant", content: String(d.content ?? "") });
+        lastAssistantIdx = out.length - 1;
+      } else if (role === Role.FUNCTION) {
+        // 散文形式的工具调用（assistant 未走 function_call 信封）：把工具调用回填到最近一条
+        // assistant，保证新协议「assistant.tool_calls 后紧跟同 id 的 tool 结果」成立。
+        let id = pendingIds.pop();
+        if (!id) {
+          id = "call_" + String(++toolSeq);
+          const la = lastAssistantIdx >= 0 ? (out[lastAssistantIdx] as Record<string, unknown>) : null;
+          if (la) {
+            const tcs = (la.tool_calls as Array<Record<string, unknown>> | undefined) ?? [];
+            tcs.push({ id, type: "function", function: { name: String(d.name ?? "unknown"), arguments: "{}" } });
+            la.tool_calls = tcs;
+          }
+        }
+        out.push({ role: "tool", content: String(d.content ?? ""), tool_call_id: id });
+      } else {
+        out.push({ role, content: String(d.content ?? "") });
+      }
+    }
+    // 兜底：历史被裁剪/中断导致残留未匹配的 tool_calls 时，剥离它们以避免缺少 tool 结果而被网关拒绝
+    const pendingSet = new Set(pendingIds);
+    if (pendingSet.size > 0) {
+      for (const msg of out) {
+        if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+          const kept = (msg.tool_calls as Array<{ id: string }>).filter((tc) => !pendingSet.has(tc.id));
+          if (kept.length === 0) delete msg.tool_calls;
+          else msg.tool_calls = kept;
+        }
+      }
+    }
+    return out;
   }
 }
 

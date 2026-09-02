@@ -1,8 +1,8 @@
-﻿<template>
+<template>
   <div class="panel-page">
     <div class="page-head">
       <div>
-        <h2 class="page-title">人物卡片</h2>
+        <h2 class="page-title">人物塑造卡片</h2>
         <p class="page-subtitle">主角 / 配角 / 反派的角色档案（状态：characters）</p>
       </div>
       <div class="head-actions">
@@ -19,7 +19,7 @@
           <template #title>
             <div class="collapse-title">
               <el-icon><User /></el-icon>
-              <span>{{ c.name || '（未命名人物）' }}</span>
+              <span>{{ c.name || '（未命名人物塑造）' }}</span>
               <el-tag :type="roleTag(c.role)" size="small">{{ roleLabel(c.role) }}</el-tag>
               <span class="collapse-count">{{ c.personality || '暂无性格' }}</span>
             </div>
@@ -48,13 +48,13 @@
               <el-button link size="small" type="primary" @click="addRelation(idx)">+ 关系</el-button>
             </div>
             <div style="margin-top: 12px; text-align: right">
-              <RowActions :items="[{ command: 'delete', label: '删除人物', icon: 'Delete', type: 'danger' }]" @command="() => removeChar(idx)" />
+              <RowActions :items="[{ command: 'delete', label: '删除人物塑造', icon: 'Delete', type: 'danger' }]" @command="() => removeChar(idx)" />
             </div>
           </div>
         </el-collapse-item>
       </el-collapse>
 
-      <el-button class="add-btn" type="primary" plain @click="addChar">+ 新增人物</el-button>
+      <el-button class="add-btn" type="primary" plain @click="addChar">+ 新增人物塑造</el-button>
     </template>
   </div>
 </template>

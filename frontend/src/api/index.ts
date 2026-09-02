@@ -189,6 +189,8 @@ export interface ModelEntry {
   max_retries: number
   status: 'untested' | 'ok' | 'failed'
   last_tested: string | null
+  /** 是否为系统默认模型（未显式分配任务/未指定模型时的全局兜底） */
+  is_default?: boolean
 }
 
 export interface CreateModelRequest {
@@ -213,6 +215,7 @@ export interface UpdateModelRequest {
   max_tokens?: number | null
   timeout?: number
   max_retries?: number
+  is_default?: boolean
 }
 
 export interface ModelTestResult {
@@ -472,30 +475,34 @@ export interface MemoryOverview {
 
 export type AgentRoleCategory = 'proposer' | 'synthesizer' | 'reviewer'
 
-export interface AgentRoleModelConfig {
-  mode: 'reference' | 'custom'
-  globalConfigId?: string
-  custom?: {
-    modelId: string
-    temperature: number
-    maxTokens?: number
-    topP?: number
-  }
-}
+/** 角色适用的创作场景：题材 / 世界观 / 大纲 / 人设 / 剧情 / 通用（跨场景） */
+export type AgentRoleScenario = 'theme' | 'worldview' | 'outline' | 'character' | 'plot' | 'general'
+
 
 export interface AgentRoleContextConfig {
   sharedContextKeys: string[]
-  roleFocusHint: string
 }
 
 export interface AgentRoleAsset {
   id: string
   name: string
   description: string
-  category: AgentRoleCategory
+   category: AgentRoleCategory
+   /** 适用创作场景（可多选）；缺省为 ["general"] */
+   scenario?: AgentRoleScenario[]
+  /** 角色用途：participant=讨论成员；director=导演；judge=共识裁判（系统角色不作为讨论成员） */
+  roleType?: "participant" | "director" | "judge"
+  /** 系统角色（导演 / 共识裁判）运行时参数：是否启用、温度、超时、输出 token 上限 */
+  systemRoleConfig?: {
+    enabled?: boolean
+    temperature?: number
+    timeoutMs?: number
+    maxTokens?: number | null
+  }
+  /** 角色使用的模型 id；为空时跟随系统默认模型 */
+  modelId?: string | null
   systemPrompt: string
   promptVariables?: string[]
-  modelConfig: AgentRoleModelConfig
   contextConfig: AgentRoleContextConfig
   createdAt: string
   updatedAt: string
@@ -506,9 +513,16 @@ export interface CreateAgentRoleRequest {
   name: string
   description: string
   category: AgentRoleCategory
+  scenario?: AgentRoleScenario[]
+  modelId?: string | null
+  systemRoleConfig?: {
+    enabled?: boolean
+    temperature?: number
+    timeoutMs?: number
+    maxTokens?: number | null
+  }
   systemPrompt: string
   promptVariables?: string[]
-  modelConfig?: AgentRoleModelConfig
   contextConfig?: AgentRoleContextConfig
 }
 
@@ -516,9 +530,16 @@ export interface UpdateAgentRoleRequest {
   name?: string
   description?: string
   category?: AgentRoleCategory
+  scenario?: AgentRoleScenario[]
+  modelId?: string | null
+  systemRoleConfig?: {
+    enabled?: boolean
+    temperature?: number
+    timeoutMs?: number
+    maxTokens?: number | null
+  }
   systemPrompt?: string
   promptVariables?: string[]
-  modelConfig?: AgentRoleModelConfig
   contextConfig?: AgentRoleContextConfig
 }
 
@@ -994,17 +1015,23 @@ export type ChatSessionEvent =
   | { type: 'system'; data: { message: string; status?: ChatSessionStatus; memberId?: string } }
   | { type: 'chat_message'; data: ChatMessageRecord }
   | { type: 'delta'; data: { messageId: string; memberId: string; memberName: string; content: string; done?: boolean } }
+  | { type: 'thinking'; data: { messageId: string; memberId: string; memberName: string; content: string } }
+  | { type: 'tool_call'; data: { messageId: string; memberId: string; memberName: string; tool: string; args: Record<string, unknown> } }
+  | { type: 'tool_result'; data: { messageId: string; memberId: string; memberName: string; tool: string; content: string; success: boolean } }
+  | { type: 'ask'; data: { messageId?: string; memberId: string; memberName: string; question: AskQuestion } }
   | { type: 'speaker'; data: { memberId: string; memberName: string; scores: Record<string, number>; reason: string } }
   | { type: 'agent_status'; data: { memberId: string; status: 'thinking' | 'generating' | 'idle' } }
   | { type: 'consensus'; data: { level: number; message: string; signals?: string[] } }
   | {
-      type: 'willingness_probe';
+      type: 'scheduler_probe';
       data: {
         round: number;
-        results: Array<{ memberId: string; memberName: string; category?: string; willingness: number; confidence: number; reason: string; wouldMention: string[]; parseOk: boolean }>;
+        ranking: Array<{ memberId: string; priority: number; reason: string }>;
+        note?: string;
         chosenId: string | null;
         fallback: boolean;
-        threshold: number;
+        parseOk: boolean;
+        raw: string;
       };
     }
   | { type: 'done'; data: { status: 'completed' | 'terminated'; summary?: string } }
@@ -1029,12 +1056,63 @@ export interface ChatConsensusNode {
   signals?: string[]
 }
 
+/** 圆桌会议全局配置（会议级默认值，区别于每个角色的模型配置）。 */
+export interface RoundtableConfig {
+  /** 单轮上下文 token 预算 */
+  maxTokens: number
+  /** 每个 Agent 每轮允许的工具调用次数上限 */
+  maxToolCalls: number
+  /** 旧版全局导演/共识配置（已废弃，改由角色卡片配置；仅作向后兼容回落） */
+  scheduler?: SchedulerRoundtableConfig
+  /** 旧版全局共识裁判配置（已废弃，改由角色卡片配置；仅作向后兼容回落） */
+  consensus?: ConsensusRoundtableConfig
+}
+
+/** 统一调度 Agent（群聊导演）配置：独立模型 / 温度 / 超时 / token。 */
+export interface SchedulerRoundtableConfig {
+  /** 是否启用导演调度 */
+  enabled: boolean
+  /** 导演专用模型 id；null 表示与讨论共用同一模型 */
+  modelId: string | null
+  /** 导演决策温度 */
+  temperature: number
+  /** 导演决策超时（ms） */
+  timeoutMs: number
+  /** 导演决策输出 token 上限 */
+  maxTokens: number
+}
+
+/** LLM 共识裁判配置：超时 / 温度 / 输出 token 上限。 */
+export interface ConsensusRoundtableConfig {
+  /** 是否启用 LLM 共识检测 */
+  enabled: boolean
+  /** 共识判定超时（ms） */
+  timeoutMs: number
+  /** 判定温度 */
+  temperature: number
+  /** 判定输出 token 上限；null 表示跟随所选模型默认配置 */
+  maxTokens: number | null
+}
+
+export const getRoundtableConfig = () =>
+  apiClient.get<RoundtableConfig>('/roundtable-config')
+
+export const updateRoundtableConfig = (data: Partial<RoundtableConfig>) =>
+  apiClient.put<RoundtableConfig>('/roundtable-config', data)
+
+export const resetRoundtableConfig = () =>
+  apiClient.post<RoundtableConfig>('/roundtable-config/reset')
+
 export interface StartChatSessionRequest {
   projectId: string
   topic: string
   memberIds: string[]
   staticContext?: Record<string, string>
   maxRounds?: number
+  /** 单轮上下文 token 预算（缺省用全局圆桌会议配置） */
+  context?: { maxTokens?: number }
+  /** 每个 Agent 每轮允许的工具调用次数上限（缺省用全局圆桌会议配置） */
+  maxToolCalls?: number
 }
 
 export const startChatSession = (data: StartChatSessionRequest) =>
@@ -1049,6 +1127,22 @@ export const getChatSession = (sessionId: string) =>
 
 export const sendChatMessage = (sessionId: string, content: string) =>
   apiClient.post<{ success: boolean; message: ChatMessageRecord }>(`/chat-sessions/${sessionId}/message`, { content })
+
+// 工单 12：查询会话中等待作者回答的提问（断连 / 刷新后恢复 ask 卡片）。
+export const getChatPendingAsk = (sessionId: string) =>
+  apiClient.get<{ has_pending: boolean; question: AskQuestion | null; memberId: string | null; memberName: string | null }>(
+    `/chat-sessions/${sessionId}/pending-ask`,
+  )
+
+// 工单 12：提交作者对 ask_user 的回答。
+export const answerChatAsk = (sessionId: string, answer: string) =>
+  apiClient.post<{ success: boolean; resumed?: boolean }>(`/chat-sessions/${sessionId}/answer`, { answer })
+
+// 工单 12：从磁盘恢复「停在 ask」的会话（进程重启后进入会话前先恢复，继续未完成的讨论）。
+export const resumeChatSession = (sessionId: string) =>
+  apiClient.post<{ success: boolean; resumed: boolean; sessionId: string; status: ChatSessionStatus }>(
+    `/chat-sessions/${sessionId}/resume`,
+  )
 
 export const stopChatSession = (sessionId: string) =>
   apiClient.post<{ success: boolean; status: ChatSessionStatus }>(`/chat-sessions/${sessionId}/stop`)
@@ -1073,7 +1167,7 @@ export async function* chatSessionStream(sessionId: string): AsyncGenerator<Chat
   const decoder = new TextDecoder()
   let buffer = ''
   let eventType = ''
-  const knownEvents = new Set(['system', 'chat_message', 'delta', 'speaker', 'agent_status', 'consensus', 'done', 'error'])
+  const knownEvents = new Set(['system', 'chat_message', 'delta', 'speaker', 'agent_status', 'scheduler_probe', 'consensus', 'ask', 'done', 'error'])
   while (true) {
     const { value, done } = await reader.read()
     if (done) break

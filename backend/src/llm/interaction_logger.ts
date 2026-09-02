@@ -29,6 +29,30 @@ function nowSeconds(): string {
 
 export class InteractionLogger {
   private _interactions: LLMInteraction[] = [];
+  private _onCommit: ((interaction: LLMInteraction) => void) | null;
+
+  constructor(onCommit?: (interaction: LLMInteraction) => void) {
+    this._onCommit = onCommit ?? null;
+  }
+
+  /** 实时提交回调：每条 LLM 调用完成后立即调用（用于路由层实时落盘） */
+  setCommit(fn: (interaction: LLMInteraction) => void): void {
+    this._onCommit = fn;
+  }
+
+  has_commit(): boolean {
+    return this._onCommit !== null;
+  }
+
+  /** 调用路由层注册的实时提交回调（失败静默，不阻断主流程） */
+  commit(interaction: LLMInteraction): void {
+    if (!this._onCommit) return;
+    try {
+      this._onCommit(interaction);
+    } catch (err) {
+      console.warn(`交互记录实时提交失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   record(
     messages: Array<ChatMessage | Record<string, unknown>>,

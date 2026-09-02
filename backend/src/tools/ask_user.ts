@@ -40,8 +40,9 @@ export class AskUserTool extends AbstractTool {
   readonly description =
     "当需要作者做出选择（如题材、平台、设定偏好、创作方向等）时调用本工具，" +
     "向作者展示选项并等待其回答。支持：单选（multiple=false）、多选（multiple=true，" +
-    "例如需要作者同时确认多个创作方向或设定维度时）、自定义文本输入（allow_custom=true，" +
-    "选项不完整或需要作者补充时开启）。options 建议提供 2-6 个候选；" +
+    "例如需要作者同时确认多个创作方向或设定维度时）。options 应提供 2-6 个候选选项，" +
+    "候选不足时系统会自动补足默认选项；系统还会在选项末尾自动追加一个“自定义回答”入口，" +
+    "供作者自由输入，因此无需担心选项不完整（无需设置 allow_custom）。" +
     "适合在创作方向不确定、需要作者拍板时使用。";
 
   readonly parameters = [

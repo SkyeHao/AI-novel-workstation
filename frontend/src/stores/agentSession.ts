@@ -71,12 +71,25 @@ function createEmpty(): ProjectAgentState {
 
 const _states = new Map<string, ProjectAgentState>()
 
-function sessionCacheKey(projectId: string, sessionId: string): string {
-  return STORAGE_PREFIX + '.cache.' + projectId + '.' + sessionId
-}
-
 function sessionStoreKey(projectId: string): string {
   return STORAGE_PREFIX + '.session.' + projectId
+}
+
+export const SESSION_SNAP_VERSION = 1
+
+/** 会话渲染快照：消息 + ask 卡片 + UI 瞬态 + 输入框草稿（localStorage 持久化） */
+export interface SessionSnapshot {
+  version: number
+  savedAt: number
+  messages: ChatMsg[]
+  activeAsk: AskQuestion | null
+  askState: { selectedOptions: string[]; customAnswer: string; customOpen: boolean }
+  draft: string
+  state: string
+}
+
+function sessionSnapKey(projectId: string, sessionId: string): string {
+  return STORAGE_PREFIX + '.snap.' + projectId + '.' + sessionId
 }
 
 export function useAgentSession(projectId: string): ProjectAgentState {
@@ -92,22 +105,25 @@ export function useAgentSession(projectId: string): ProjectAgentState {
   return s
 }
 
-export function snapshotToSessionStorage(projectId: string, sessionId: string, messages: ChatMsg[]): void {
-  if (!sessionId || messages.length === 0) return
-  try { sessionStorage.setItem(sessionCacheKey(projectId, sessionId), JSON.stringify(messages)) } catch { /* ignore */ }
+export function snapshotToLocalStorage(projectId: string, sessionId: string, snap: SessionSnapshot): void {
+  if (!sessionId) return
+  try { localStorage.setItem(sessionSnapKey(projectId, sessionId), JSON.stringify(snap)) } catch { /* ignore */ }
 }
 
-export function snapshotFromSessionStorage(projectId: string, sessionId: string): ChatMsg[] | null {
+export function snapshotFromLocalStorage(projectId: string, sessionId: string): SessionSnapshot | null {
   if (!sessionId) return null
   try {
-    const raw = sessionStorage.getItem(sessionCacheKey(projectId, sessionId))
-    if (raw) return JSON.parse(raw) as ChatMsg[]
+    const raw = localStorage.getItem(sessionSnapKey(projectId, sessionId))
+    if (raw) {
+      const snap = JSON.parse(raw) as SessionSnapshot
+      if (snap && snap.version === SESSION_SNAP_VERSION) return snap
+    }
   } catch { /* ignore */ }
   return null
 }
 
-export function clearSnapshot(projectId: string, sessionId: string): void {
-  try { sessionStorage.removeItem(sessionCacheKey(projectId, sessionId)) } catch { /* ignore */ }
+export function clearLocalSnapshot(projectId: string, sessionId: string): void {
+  try { localStorage.removeItem(sessionSnapKey(projectId, sessionId)) } catch { /* ignore */ }
 }
 
 export function rememberSession(projectId: string, sessionId: string): void {

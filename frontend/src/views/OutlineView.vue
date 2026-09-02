@@ -1,8 +1,8 @@
-﻿<template>
+<template>
   <div class="panel-page">
     <div class="page-head">
       <div>
-        <h2 class="page-title">章纲规划</h2>
+        <h2 class="page-title">大纲生成规划</h2>
         <p class="page-subtitle">分卷 / 篇章 / 章节 三级结构（状态：outline）</p>
       </div>
       <div class="head-actions">

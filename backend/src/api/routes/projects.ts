@@ -1,14 +1,27 @@
-﻿/** 项目管理路由（TS 版，迁移自 api/routes/projects.py）。
+/** 项目管理路由（TS 版，迁移自 api/routes/projects.py）。
  * 新增：状态机端点（states / current-state / states/switch）、伏笔与记忆端点。 */
 import type { FastifyInstance } from "fastify";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectStore } from "../state.js";
 import { Project, ProjectNotFoundError, ProjectError } from "../../storage/project_store.js";
-import { SettingsStore } from "../../storage/settings_store.js";
+import { SettingsStore, SettingSnapshot } from "../../storage/settings_store.js";
 import { MemoryStore } from "../../storage/memory_store.js";
 import { DEFAULT_STATES, getStateNode, legacyStatusToNew } from "../../storage/states.js";
+import { DynamicSettingsStore, ALL_ACCOUNTS, accountMeta, accountCount } from "../../storage/dynamic_settings.js";
+import { DocumentRegistry, type DocumentKind } from "../../storage/document_registry.js";
 import { coreElementsPath, loadCoreElements } from "../../workflow/core_elements.js";
+
+/** 递归统计大纲节点数量（含子节点）。 */
+function countOutlineNodes(nodes?: unknown[]): number {
+  if (!Array.isArray(nodes)) return 0;
+  let count = 0;
+  for (const node of nodes) {
+    count += 1;
+    count += countOutlineNodes((node as { children?: unknown[] })?.children);
+  }
+  return count;
+}
 
 export async function projectsRoutes(app: FastifyInstance): Promise<void> {
   const store = () => getProjectStore();
@@ -77,6 +90,79 @@ export async function projectsRoutes(app: FastifyInstance): Promise<void> {
     } catch (err) {
       return reply.code(404).send({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  // ---- 静态设定聚合（各类型存在性与数量，供设定页统计导航） ----
+  app.get<{ Params: { id: string } }>("/:id/settings", async (req, reply) => {
+    const { id } = req.params;
+    const settings = new SettingsStore(store());
+    const registry = new DocumentRegistry(store());
+    const settingTypes: Array<{ type: string; label: string }> = [
+      { type: "vision", label: "故事愿景" },
+      { type: "worldview", label: "世界观构建" },
+      { type: "characters", label: "人物塑造" },
+      { type: "outline", label: "大纲" },
+      { type: "style", label: "风格规范" },
+    ];
+    const result = settingTypes.map(({ type, label }) => {
+      const doc = registry.read(id, type as DocumentKind);
+      const hasDoc = !!doc && doc.content.trim().length > 0;
+      const data = type === "vision" ? null : settings.get(id, type);
+      const structuredEmpty = type === "vision" || SettingSnapshot.is_empty(data ?? {}, type);
+      let count = hasDoc ? 1 : 0;
+      if (!structuredEmpty && type !== "vision") {
+        if (type === "worldview") {
+          const sections = ((data as Record<string, unknown>).sections as Record<string, string> | undefined) ?? {};
+          count = Object.values(sections).filter((v) => v).length;
+        } else if (type === "characters") {
+          count = (((data as Record<string, unknown>).characters as unknown[] | undefined) ?? []).length;
+        } else if (type === "outline") {
+          const root = ((data as Record<string, unknown>).root as Record<string, unknown> | undefined) ?? {};
+          count = countOutlineNodes(root.children as unknown[] | undefined);
+        } else {
+          count = 1;
+        }
+      }
+      return { type, label, exists: hasDoc || !structuredEmpty, count };
+    });
+    return { settings: result };
+  });
+
+  // ---- 动态设定账本（只读，由正文章末自动回写） ----
+  app.get<{ Params: { id: string; account: string } }>("/:id/dynamic/:account", async (req, reply) => {
+    const { id, account } = req.params;
+    if (!ALL_ACCOUNTS.includes(account as (typeof ALL_ACCOUNTS)[number])) {
+      return reply.code(400).send({ error: `未知账本类型: ${account}` });
+    }
+    const dynamic = new DynamicSettingsStore(store());
+    try {
+      const data = dynamic.load(id, account as (typeof ALL_ACCOUNTS)[number]);
+      return { account, exists: data !== null, kind: accountMeta(account as (typeof ALL_ACCOUNTS)[number]).kind, data };
+    } catch (err) {
+      if (err instanceof ProjectNotFoundError) return reply.code(404).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  // ---- 动态设定账本聚合（全部账本 + 统计，供工作台总览） ----
+  app.get<{ Params: { id: string } }>("/:id/dynamic", async (req, reply) => {
+    const { id } = req.params;
+    const dynamic = new DynamicSettingsStore(store());
+    const accounts = dynamic.listAccounts(id).map((account) => {
+      const data = dynamic.load(id, account);
+      const meta = accountMeta(account);
+      return {
+        account,
+        label: meta.label,
+        kind: meta.kind,
+        description: meta.description,
+        exists: data !== null,
+        count: accountCount(data),
+        updated_at: data?.meta?.updated_at ?? null,
+        last_chapter: data?.meta?.last_chapter ?? null,
+      };
+    });
+    return { accounts };
   });
 
   // ---- 状态机（T1/T2） ----
@@ -153,10 +239,31 @@ export async function projectsRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get<{ Params: { id: string } }>("/:id/documents", async (req, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { kind?: string } }>("/:id/documents", async (req, reply) => {
     try {
-      const { getProjectDocuments } = await import("../../workflow/documents.js");
-      return getProjectDocuments(store(), req.params.id);
+      const { DocumentRegistry, DOCUMENT_KINDS } = await import("../../storage/document_registry.js");
+      const kind = String(req.query.kind ?? "").trim() as never;
+      if (kind && !DOCUMENT_KINDS.includes(kind)) {
+        return reply.code(400).send({ error: "未知文档类型: " + kind });
+      }
+      const registry = new DocumentRegistry(store());
+      const documents = registry.list(req.params.id, kind || undefined).map((d) => {
+        let size = 0;
+        try {
+          const full = store().resolve(req.params.id, d.path);
+          size = fs.existsSync(full) ? fs.statSync(full).size : 0;
+        } catch { /* 忽略 */ }
+        return {
+          kind: d.kind,
+          title: d.title,
+          name: d.title,
+          path: d.path,
+          work_unit: d.work_unit,
+          modified: d.modified,
+          size,
+        };
+      });
+      return { documents };
     } catch (err) {
       return reply.code(500).send({ error: err instanceof Error ? err.message : String(err) });
     }

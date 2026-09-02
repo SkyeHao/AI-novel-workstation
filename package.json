@@ -1,0 +1,13 @@
+{
+  "name": "ai-novel-workstation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI 小说工作站 —— Web 版与 Windows 桌面版根工作区",
+  "scripts": {
+    "build:all": "npm --prefix backend run build && npm --prefix frontend run build",
+    "desktop:dev": "npm --prefix desktop run dev",
+    "test:backend": "npm --prefix backend test",
+    "desktop:build": "npm run build:all && npm --prefix desktop run build",
+    "desktop:build:portable": "npm run build:all && npm --prefix desktop run build:portable"
+  }
+}

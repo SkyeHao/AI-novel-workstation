@@ -87,14 +87,16 @@ export function clusterSimilarity(vectors: number[][]): number {
 
 export class QdrantVectorStore implements VectorStore {
   readonly name = "qdrant";
+  /** Qdrant 服务地址（运行配置契约的可观察部分，测试用） */
+  readonly url: string;
   private _client: QdrantClientLike | null = null;
   private _collection: string;
-  private _url: string;
   private _apiKey: string | undefined;
   private _connectTimeoutMs: number;
 
   constructor(options: VectorStoreOptions = {}) {
-    this._url = options.url ?? DEFAULT_URL;
+    // 未显式指定时回退到环境变量 QDRANT_URL（桌面版指向内置 Qdrant 子进程），最后才是默认地址
+    this.url = options.url ?? process.env.QDRANT_URL ?? DEFAULT_URL;
     this._apiKey = options.apiKey;
     this._collection = options.collectionName ?? DEFAULT_COLLECTION;
     this._connectTimeoutMs = options.connectTimeoutMs ?? 3000;
@@ -108,7 +110,7 @@ export class QdrantVectorStore implements VectorStore {
         cfg: Record<string, unknown>
       ) => QdrantClientLike;
       this._client = new QdrantClientCtor({
-        url: this._url,
+        url: this.url,
         apiKey: this._apiKey || undefined,
         timeout: this._connectTimeoutMs,
         checkCompatibility: false,

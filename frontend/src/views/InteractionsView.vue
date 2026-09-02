@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="interactions-view">
    <PageHeader title="交互记录" subtitle="LLM 调用历史 · 按会话分组展示" icon="Document">
      <template #actions>
@@ -217,7 +217,7 @@
                 <el-icon size="48"><ChatLineSquare /></el-icon>
               </div>
               <p class="empty-title">暂无群聊讨论记录</p>
-             <span class="empty-hint">在「群聊式剧情讨论」中开展讨论后，完整讨论记录将按作品展示在这里</span>
+             <span class="empty-hint">在「圆桌会议」中开展讨论后，完整讨论记录将按作品展示在这里</span>
            </div>
 
             <!-- 群聊分组：作品 → 讨论会话 -->
@@ -727,7 +727,7 @@ function chatCategoryLabel(category?: AgentRoleCategory | string): string {
   const labels: Record<string, string> = {
     proposer: '提案者',
     synthesizer: '合成者',
-    reviewer: '评审者',
+    reviewer: '挑刺者',
   }
   if (!category) return ''
   return labels[category] || category
@@ -743,7 +743,7 @@ function chatCategoryTagType(category?: AgentRoleCategory | string): 'success' |
   return types[category] || 'info'
 }
 
-/** 头像配色：作者红 / 提案者绿 / 合成者橙 / 评审者灰 / 普通 Agent 蓝 */
+/** 头像配色：作者红 / 提案者绿 / 合成者橙 / 挑刺者灰 / 普通 Agent 蓝 */
 function avatarClassFor(target: { kind?: string; category?: AgentRoleCategory }): string {
   if (target.kind === 'author') return 'avatar-author'
   if (target.category === 'proposer') return 'avatar-proposer'

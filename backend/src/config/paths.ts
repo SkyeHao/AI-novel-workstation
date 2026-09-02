@@ -34,6 +34,20 @@ export function getLegacyEnvPath(): string {
   return resolve(PROJECT_ROOT, ".env");
 }
 
+/** 运行期数据目录（app-state / interactions / agent-roles / projects）。桌面版可用 AI_NOVEL_DATA_DIR 覆盖到用户可写目录。 */
+export function getDataDir(): string {
+  const override = process.env.AI_NOVEL_DATA_DIR;
+  if (override) return resolve(override);
+  return resolve(PROJECT_ROOT, "data");
+}
+
+/** 本地 embedding 模型目录（离线权重）。桌面版可用 AI_NOVEL_EMBEDDING_DIR 覆盖到内置资源目录。 */
+export function getEmbeddingDir(): string {
+  const override = process.env.AI_NOVEL_EMBEDDING_DIR;
+  if (override) return resolve(override);
+  return resolve(getUserConfigDir(), "models");
+}
+
 export function migrateEnvIfNeeded(): string {
   const target = getEnvFilePath();
   if (fs.existsSync(target)) return target;

@@ -2,7 +2,7 @@
 
 工程化 AI 辅助长篇网络小说创作系统（20 万~500 万字量级）。基于 **Agent 中心化重构**（ADR-0005）与 **全栈 TypeScript 迁移**（ADR-0006）。
 
-> 📌 术语见 [CONTEXT.md](./CONTEXT.md)，决策记录见 [docs/adr/](./docs/adr/)，迁移计划见 [docs/迁移计划-全栈TS.md](./docs/迁移计划-全栈TS.md)，实现路线图见 [.scratch/agent-centric-redesign/](./.scratch/agent-centric-redesign/)。
+> 📌 术语见 [CONTEXT.md](./CONTEXT.md)，决策记录见 [docs/adr/](./docs/adr/)，迁移计划见 [docs/迁移计划-全栈TS.md](./docs/迁移计划-全栈TS.md)，实现路线图见 [.scratch/agent-centric-redesign/](./.scratch/agent-centric-redesign/)，桌面调试见 [docs/desktop调试手册.md](./docs/desktop调试手册.md)。
 
 ## 架构总览
 

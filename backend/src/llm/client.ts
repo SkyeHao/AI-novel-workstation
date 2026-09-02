@@ -72,12 +72,14 @@ export class LLMClient {
           interaction.completion_tokens = resp.usage.completion_tokens;
           interaction.total_tokens = resp.usage.total_tokens;
           interaction.elapsed_ms = Date.now() - start;
+          this._interaction_logger?.commit(interaction);
         }
         return resp;
       } catch (exc) {
         if (interaction) {
           interaction.error = exc instanceof Error ? exc.message : String(exc);
           interaction.elapsed_ms = Date.now() - start;
+          this._interaction_logger?.commit(interaction);
         }
         throw this._wrapException(exc);
       }
@@ -88,7 +90,12 @@ export class LLMClient {
   // 异步接口
   // ------------------------------------------------------------------
 
-  async achat(messages: Array<ChatMessage | Record<string, unknown>>, kwargs: Record<string, unknown> = {}): Promise<ChatResponse> {
+  async achat(
+    messages: Array<ChatMessage | Record<string, unknown>>,
+    kwargs: Record<string, unknown> = {},
+    signal?: AbortSignal
+  ): Promise<ChatResponse> {
+    if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
     return this._withRetryAsync(async () => {
       const request = this._buildRequest(messages, kwargs);
       const apiParams = request.toApiParams(this.config.model);
@@ -102,7 +109,7 @@ export class LLMClient {
       ) ?? null;
       const start = Date.now();
       try {
-        const completion = await this._sync_client.chat.completions.create(apiParams as never);
+        const completion = await this._sync_client.chat.completions.create(apiParams as never, { signal } as never);
         const resp = this._parseResponse(completion);
         if (interaction) {
           interaction.response_content = resp.content;
@@ -111,12 +118,14 @@ export class LLMClient {
           interaction.completion_tokens = resp.usage.completion_tokens;
           interaction.total_tokens = resp.usage.total_tokens;
           interaction.elapsed_ms = Date.now() - start;
+          this._interaction_logger?.commit(interaction);
         }
         return resp;
       } catch (exc) {
         if (interaction) {
           interaction.error = exc instanceof Error ? exc.message : String(exc);
           interaction.elapsed_ms = Date.now() - start;
+          this._interaction_logger?.commit(interaction);
         }
         throw this._wrapException(exc);
       }
@@ -127,8 +136,10 @@ export class LLMClient {
   async *astream(
     messages: Array<ChatMessage | Record<string, unknown>>,
     kwargs: Record<string, unknown> = {},
-    onDelta?: (delta: { content?: string | null; function_call?: { name?: string | null; arguments?: string | null } | null }) => void
+    onDelta?: (delta: { content?: string | null; function_call?: { name?: string | null; arguments?: string | null } | null }) => void,
+    signal?: AbortSignal
   ): AsyncGenerator<string> {
+    if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
     const request = this._buildRequest(messages, kwargs);
     const apiParams = request.toApiParams(this.config.model);
     apiParams.stream = true;
@@ -145,11 +156,14 @@ export class LLMClient {
     let finishReason = "";
     let prompt = 0;
     let completion = 0;
+    // 新版流式工具调用（tool_calls）→ 按 index 累积分片，再合成为旧 function_call 片段，
+    // 供 react.ts native 模式（累加 name/arguments）消费，保持其流式逻辑不变。
+    const streamFcFragments = new Map<number, { name: string; arguments: string }>();
     // 流式空闲看门狗：长时间无新分片则中止，避免「卡住」无限等待（SDK timeout 只覆盖建连，不覆盖流式过程）
     const idleTimeoutMs = (Number(process.env.LLM_STREAM_IDLE_TIMEOUT) || 90) * 1000;
     let idleAborted = false;
     try {
-      const stream = (await this._sync_client.chat.completions.create(apiParams as never)) as unknown as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk> & {
+      const stream = (await this._sync_client.chat.completions.create(apiParams as never, { signal } as never)) as unknown as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk> & {
         controller?: AbortController;
       };
       let lastActivity = Date.now();
@@ -161,11 +175,41 @@ export class LLMClient {
       }, 5000);
       try {
         for await (const chunk of stream) {
+          if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
           lastActivity = Date.now();
           const choice = chunk.choices?.[0];
           const delta = choice?.delta;
           if (delta) {
-            if (onDelta) onDelta(delta as never);
+            if (onDelta) {
+              const toolCalls = (delta as unknown as { tool_calls?: Array<{ index?: number; function?: { name?: string | null; arguments?: string | null } | null }> }).tool_calls;
+              if (Array.isArray(toolCalls)) {
+                let fcFragment: { name?: string; arguments?: string } | null = null;
+                for (const tc of toolCalls) {
+                  const fn = tc.function;
+                  if (!fn) continue;
+                  const idx = tc.index ?? 0;
+                  let acc = streamFcFragments.get(idx);
+                  if (!acc) {
+                    acc = { name: "", arguments: "" };
+                    streamFcFragments.set(idx, acc);
+                  }
+                  if (fn.name) {
+                    acc.name += fn.name;
+                    fcFragment = fcFragment ?? {};
+                    fcFragment.name = (fcFragment.name ?? "") + fn.name;
+                  }
+                  if (fn.arguments) {
+                    acc.arguments += fn.arguments;
+                    fcFragment = fcFragment ?? {};
+                    fcFragment.arguments = (fcFragment.arguments ?? "") + fn.arguments;
+                  }
+                }
+                if (fcFragment && !(delta as unknown as { function_call?: unknown }).function_call) {
+                  (delta as unknown as { function_call?: unknown }).function_call = fcFragment;
+                }
+              }
+              onDelta(delta as never);
+            }
             if (delta.content) {
               accumulated += delta.content;
               yield delta.content;
@@ -187,6 +231,7 @@ export class LLMClient {
         interaction.completion_tokens = completion;
         interaction.total_tokens = prompt + completion;
         interaction.elapsed_ms = Date.now() - start;
+        this._interaction_logger?.commit(interaction);
       }
     } catch (exc) {
       if (interaction) {
@@ -196,6 +241,7 @@ export class LLMClient {
             ? exc.message
             : String(exc);
         interaction.elapsed_ms = Date.now() - start;
+        this._interaction_logger?.commit(interaction);
       }
       if (idleAborted) throw new LLMTimeoutError(`流式响应空闲超时（${idleTimeoutMs / 1000}s 无数据），已中止`);
       throw this._wrapException(exc);
@@ -267,7 +313,19 @@ export class LLMClient {
     try {
       const c = completion as OpenAI.Chat.Completions.ChatCompletion;
       const choice = c.choices[0];
-      const content = choice?.message?.content ?? "";
+      const msg = choice?.message;
+      // 新版 tools 协议返回 tool_calls，兼容内部旧 function_call 读取：
+      // 把第一条工具调用映射为 message.function_call（chat_session / react 均依赖该字段）
+      if (msg && Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        const first = msg.tool_calls[0] as unknown as { function?: { name: string; arguments: string } };
+        if (first && first.function) {
+          (msg as unknown as { function_call?: unknown }).function_call = {
+            name: first.function.name,
+            arguments: first.function.arguments,
+          };
+        }
+      }
+      const content = msg?.content ?? "";
       const usage = c.usage;
       const tokenUsage = usage
         ? new TokenUsage(usage.prompt_tokens ?? 0, usage.completion_tokens ?? 0, usage.total_tokens ?? 0)

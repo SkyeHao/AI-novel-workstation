@@ -797,7 +797,9 @@ describe("ChatSession（工单 05：分层上下文组装）", () => {
       cooldownMs: 10,
       idleTimeoutMs: 20,
       maxRounds: 1,
-      context: { maxTokens: 300, countTokens: (t: string) => Math.ceil(t.length / 2) },
+      // askRule 变长后，任务指令占用更多预算；调大预算使「静态截断+保留任务指令」
+      // 落在预期降级路径（第②步静态截断生效，避免第④步头部硬截断吞掉「已截断」标记）
+      context: { maxTokens: 600, countTokens: (t: string) => Math.ceil(t.length / 2) },
     });
     await session.start();
 
@@ -818,7 +820,7 @@ describe("ChatSession（工单 05：分层上下文组装）", () => {
       cooldownMs: 10,
       idleTimeoutMs: 20,
       maxRounds: 4,
-      context: { l1Count: 1, l2Count: 3, maxTokens: 105, countTokens: (t: string) => Math.ceil(t.length / 2) },
+      context: { l1Count: 1, l2Count: 3, maxTokens: 100, countTokens: (t: string) => Math.ceil(t.length / 2) },
     });
     await session.start();
 
@@ -1066,5 +1068,443 @@ describe("ChatSession（首条消息激活：标题仅作会话名）", () => {
     session.stop();
     expect(session.getStatus()).toBe("terminated");
     await expect(session.sendUserMessage("hi")).rejects.toThrow(/已结束/);
+  });
+});
+
+describe("ChatSession（工单 12：不限轮次直到达成共识）", () => {
+  const AGREE_1 = "我同意这个方案。\n【共识度：0.9】";
+  const AGREE_2 = "我也一致认可，可以定稿。\n【共识度：0.95】";
+  const SUMMARY = "核心共识：第 10 章引入外部威胁。\n主要分歧：敌人身份。\n综合方案：分两幕推进。\n行动建议：先写人物反应。";
+
+  it("maxRounds=0 不限轮次：达成共识后提前由合成者收束，不跑满上限", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    fake.replies = [AGREE_1, AGREE_2, SUMMARY];
+    const session = new ChatSession({
+      projectId: "proj-12",
+      topic: "t",
+      members: makeMembersWithSynthesizer(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 0,
+      unlimitedMaxRounds: 4,
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.start();
+    expect(session.getStatus()).toBe("completed");
+
+    const done = events.find((e) => e.type === "done")!;
+    expect((done.data as { status: string; summary?: string }).summary).toBe(SUMMARY);
+
+    const systemText = events
+      .filter((e) => e.type === "system")
+      .map((e) => e.data.message)
+      .join("\n");
+    expect(systemText).toContain("已达成共识");
+    expect(systemText).not.toContain("安全上限");
+  });
+
+  it("maxRounds=0 不限轮次：始终未达成共识时按安全上限强制合成收束", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-12",
+      topic: "t",
+      members: makeMembersWithSynthesizer(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 0,
+      unlimitedMaxRounds: 3,
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.start();
+    expect(session.getStatus()).toBe("completed");
+
+    const systemText = events
+      .filter((e) => e.type === "system")
+      .map((e) => e.data.message)
+      .join("\n");
+    expect(systemText).toContain("安全上限");
+
+    const done = events.find((e) => e.type === "done")!;
+    expect((done.data as { status: string; summary?: string }).summary).toBeDefined();
+  });
+});
+
+describe("ChatSession._extractAskToAuthor（工单 13：正文提问兜底）", () => {
+  function makeSession() {
+    const fake = new FakeLLMClient();
+    const session = new ChatSession({
+      projectId: "proj-13",
+      topic: "t",
+      members: makeMembers(),
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      maxRounds: 1,
+    });
+    return { fake, session };
+  }
+
+  it("正文含面向作者提问时提取 question 与 A/B 候选", () => {
+    const { session } = makeSession();
+    const ask = (session as any)._extractAskToAuthor(
+      "我建议走都市题材，A. 都市职场 B. 都市异能 C. 都市修仙，你来定一下选哪个。"
+    );
+    expect(ask).not.toBeNull();
+    expect(ask.question).toContain("你来定");
+    expect(ask.options.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("正文含「是否采用」问句时同样命中", () => {
+    const { session } = makeSession();
+    const ask = (session as any)._extractAskToAuthor(
+      "我推荐在番茄走轻悬疑路线，是否采用这个方向？"
+    );
+    expect(ask).not.toBeNull();
+    expect(ask.question).toContain("是否采用");
+  });
+
+  it("纯陈述、无作者提问信号时不命中", () => {
+    const { session } = makeSession();
+    expect((session as any)._extractAskToAuthor("我建议主角动机是复仇，这样冲突更强。")).toBeNull();
+    expect((session as any)._extractAskToAuthor("")).toBeNull();
+    expect((session as any)._extractAskToAuthor("   ")).toBeNull();
+  });
+});
+
+describe("ChatSession（作者驳回 → 强制回到提案者）", () => {
+  /** 按系统提示名区分「调度员」与成员发言的假 LLM：导演返回脚本化 ranking，成员返回脚本化正文。 */
+  class RejectionFakeLLM {
+    directorScript: string[] = [];
+    memberScript: string[] = [];
+    count_tokens(): number { return 0; }
+    count_text_tokens(text: string): number { return text.length; }
+    async achat(messages: Array<{ role: string; content?: string; name?: string | null }>): Promise<{ content: string; model: string }> {
+      const name = (messages[0] as { name?: string | null } | undefined)?.name ?? "角色";
+      if (name === "调度员") {
+        return { content: this.directorScript.shift() ?? "", model: "fake" };
+      }
+      return { content: this.memberScript.shift() ?? "这是「" + name + "」的发言", model: "fake" };
+    }
+    async *astream(messages: Array<{ role: string; content?: string; name?: string | null }>): AsyncGenerator<string> {
+      const name = (messages[0] as { name?: string | null } | undefined)?.name ?? "角色";
+      const content = this.memberScript.shift() ?? "这是「" + name + "」的发言";
+      for (const ch of content) yield ch;
+    }
+    close(): void {}
+  }
+
+  function waitFor(cond: () => boolean, timeoutMs = 3000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const start = Date.now();
+      const t = setInterval(() => {
+        if (cond()) {
+          clearInterval(t);
+          resolve();
+        } else if (Date.now() - start > timeoutMs) {
+          clearInterval(t);
+          reject(new Error("waitFor timeout"));
+        }
+      }, 10);
+    });
+  }
+
+  it("作者「换个方向」驳回提案后，导演即使选挑刺者也被硬规则强制回提案者", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new RejectionFakeLLM();
+    // 导演脚本：第 1 次选题材舵手；作者驳回后再调度仍选魔鬼代言人（用于验证硬规则覆盖导演）
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "nav", priority: 1, reason: "提案者先给方向" }] }));
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "从未发言，挑刺换方向" }] }));
+    // 第 3 次：轮次将尽，导演任意选（合成者收束规则会接管，保证会话正常收尾）
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: 'dev', priority: 1, reason: '再次挑刺' }] }));
+    // 题材舵手首次发言含向作者提问 → 触发 ask 挂起；第二次（被强制拉回）给出新方向
+    fake.memberScript.push("我建议题材定为都市神豪+直播。请作者确认方向：A. 采用  B. 换一个方向");
+    fake.memberScript.push("新方向：都市脑洞+系统流，更契合下沉市场");
+
+    const session = new ChatSession({
+      projectId: "proj-rej",
+      topic: "题材讨论",
+      members: [
+        { id: "nav", kind: "agent", name: "题材舵手", description: "定位题材", category: "proposer", systemPrompt: "你是题材舵手" },
+        { id: "dev", kind: "agent", name: "魔鬼代言人", description: "挑刺", category: "reviewer", systemPrompt: "你是魔鬼代言人" },
+        { id: "syn", kind: "agent", name: "合成者", description: "收束", category: "synthesizer", systemPrompt: "你是合成者" },
+      ],
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 3,
+      schedulerAgent: { enabled: true },
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.sendUserMessage("帮我定一个适合新手的题材");
+    // 题材舵手首次发言带提问 → 触发 ask 挂起等待作者
+    await waitFor(() => session.hasPendingAsk);
+
+    // 作者驳回并换方向
+    await session.submitAskAnswer("换个方向再讨论");
+    await waitFor(() => session.getStatus() === "completed");
+
+    // 作者驳回后下一位 agent 发言必须是提案者「题材舵手」，而不是导演想选的魔鬼代言人
+    const agentMsgs = events
+      .filter((e): e is { type: "chat_message"; data: ChatMessageRecord } => e.type === "chat_message")
+      .map((e) => e.data)
+      .filter((m) => m.kind === "agent");
+    expect(agentMsgs.length).toBeGreaterThanOrEqual(2);
+    // 第 1 条为首次提案（题材舵手）
+    expect(agentMsgs[0]!.memberName).toBe("题材舵手");
+    // 第 2 条仍应是题材舵手（被强制拉回重新提案），而不是魔鬼代言人
+    expect(agentMsgs[1]!.memberName).toBe("题材舵手");
+    expect(agentMsgs[1]!.content).toContain("新方向");
+    // 魔鬼代言人整场未发言（硬规则覆盖了导演的挑刺选择）
+    expect(agentMsgs.some((m) => m.memberName === "魔鬼代言人")).toBe(false);
+
+    // 存在「作者驳回强制回到提案者」的调度探针事件
+    // 取触发驳回兜底的探针（turn 0 时驳回尚未发生，首个探针不含驳回态）
+    const probe = events.find((e) => e.type === "scheduler_probe" && (e.data as Record<string, unknown>).rejectionForced === true);
+    expect(probe).toBeDefined();
+    const pd = (probe as { data: Record<string, unknown> }).data;
+    expect(pd.rejectedProposerId).toBe("nav");
+    expect(pd.rejectionForced).toBe(true);
+  });
+
+  /** 门控假 LLM：成员首轮 achat 挂起直到 releaseMember()，成员发言一律以 finish_turn 显式提交结论。 */
+  class GatedFinishFakeLLM {
+    directorScript: string[] = [];
+    memberConclusions: string[] = [];
+    private memberCall = 0;
+    private gate: Promise<void>;
+    private releaseFn: () => void = () => {};
+    constructor() {
+      this.gate = new Promise<void>((r) => {
+        this.releaseFn = r;
+      });
+    }
+    count_tokens(): number {
+      return 0;
+    }
+    count_text_tokens(text: string): number {
+      return text.length;
+    }
+    async achat(messages: Array<{ role: string; content?: string; name?: string | null }>): Promise<{ content: string; function_call?: { name: string; arguments: string }; model: string }> {
+      const name = (messages[0] as { name?: string | null } | undefined)?.name ?? "角色";
+      if (name === "调度员") {
+        return { content: this.directorScript.shift() ?? "", model: "fake" };
+      }
+      this.memberCall += 1;
+      // 模拟 Agent 仍在工具流中：首轮挂起，直到测试放行（证明事务期间未被调度打断）
+      if (this.memberCall === 1) await this.gate;
+      const conclusion = this.memberConclusions.shift() ?? "「" + name + "」的最终结论";
+      return { content: "", function_call: { name: "finish_turn", arguments: JSON.stringify({ conclusion }) }, model: "fake" };
+    }
+    async *astream(): AsyncGenerator<string> {}
+    close(): void {}
+    releaseMember(): void {
+      this.releaseFn();
+    }
+    get calls(): number {
+      return this.memberCall;
+    }
+  }
+
+  it("事务内作者「换个方向」排队不抢话筒：当前 Agent 提交后导演才以驳回态调回提案者", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new GatedFinishFakeLLM();
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "nav", priority: 1, reason: "提案者先给方向" }] }));
+    // 第 2 次调度故意选魔鬼代言人（验证驳回硬规则覆盖导演）；第 3 次会被收束规则接管
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "挑刺" }] }));
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "再挑刺" }] }));
+    fake.memberConclusions.push("初始提案：都市题材");
+    fake.memberConclusions.push("按作者反馈调整后的新方向：玄幻题材");
+
+    const session = new ChatSession({
+      projectId: "proj-queued-reject",
+      topic: "题材讨论",
+      members: [
+        { id: "nav", kind: "agent", name: "题材舵手", description: "定位题材", category: "proposer", systemPrompt: "你是题材舵手" },
+        { id: "dev", kind: "agent", name: "魔鬼代言人", description: "挑刺", category: "reviewer", systemPrompt: "你是魔鬼代言人" },
+        { id: "syn", kind: "agent", name: "合成者", description: "收束", category: "synthesizer", systemPrompt: "你是合成者" },
+      ],
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 3,
+      schedulerAgent: { enabled: true },
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.sendUserMessage("帮我定一个适合新手的题材");
+    // 等待题材舵手进入工具流（首轮 achat 已挂起，尚未提交本轮）
+    await waitFor(() => fake.calls === 1);
+
+    // 此刻 Agent 事务进行中：作者发「换个方向」，应立即被排队而非改写驳回态 / 触发调度
+    await session.sendUserMessage("换个方向再讨论");
+    expect(events.some((e) => e.type === "system" && (e.data as { message?: string }).message?.includes("将在当前发言者完成本轮后"))).toBe(true);
+    // 事务未提交前：不应出现任何 agent 发言，导演也未进行第二次调度
+    const preAgentMsgs = events
+      .filter((e): e is { type: "chat_message"; data: ChatMessageRecord } => e.type === "chat_message")
+      .filter((e) => e.data.kind === "agent");
+    expect(preAgentMsgs.length).toBe(0);
+    expect(events.filter((e) => e.type === "scheduler_probe").length).toBe(1);
+
+    // 放行当前事务：题材舵手以 finish_turn 提交结论 → 排空队列合并驳回态 → 下次调度被硬规则拉回提案者
+    fake.releaseMember();
+    await waitFor(() => session.getStatus() === "completed");
+
+    const agentMsgs = events
+      .filter((e): e is { type: "chat_message"; data: ChatMessageRecord } => e.type === "chat_message")
+      .map((e) => e.data)
+      .filter((m) => m.kind === "agent");
+    expect(agentMsgs.length).toBeGreaterThanOrEqual(2);
+    expect(agentMsgs[0]!.memberName).toBe("题材舵手");
+    // 驳回态强制回到提案者，而非导演选中的魔鬼代言人
+    expect(agentMsgs[1]!.memberName).toBe("题材舵手");
+    expect(agentMsgs[1]!.content).toContain("新方向");
+    expect(agentMsgs.some((m) => m.memberName === "魔鬼代言人")).toBe(false);
+    // 兜底探针确认为驳回强拉
+    const probe = events.find((e) => e.type === "scheduler_probe" && (e.data as Record<string, unknown>).rejectionForced === true);
+    expect(probe).toBeDefined();
+    expect((probe as { data: Record<string, unknown> }).data.rejectedProposerId).toBe("nav");
+  });
+
+  it("事务内多条作者消息按到达顺序排空：最后一条决定驳回态", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new GatedFinishFakeLLM();
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "nav", priority: 1, reason: "提案者先给方向" }] }));
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "挑刺" }] }));
+    // 第 3、4 次调度剩余轮次<=2，会被收束规则接管，脚本值不影响结果
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "再挑刺" }] }));
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "收尾挑刺" }] }));
+    fake.memberConclusions.push("初始提案：都市题材");
+    fake.memberConclusions.push("魔鬼代言人的挑刺：方向A风险过高");
+    fake.memberConclusions.push("合成者：综合双方建议收敛方案");
+
+    const session = new ChatSession({
+      projectId: "proj-queued-order",
+      topic: "题材讨论",
+      members: [
+        { id: "nav", kind: "agent", name: "题材舵手", description: "定位题材", category: "proposer", systemPrompt: "你是题材舵手" },
+        { id: "dev", kind: "agent", name: "魔鬼代言人", description: "挑刺", category: "reviewer", systemPrompt: "你是魔鬼代言人" },
+        { id: "syn", kind: "agent", name: "合成者", description: "收束", category: "synthesizer", systemPrompt: "你是合成者" },
+      ],
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 4,
+      schedulerAgent: { enabled: true },
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.sendUserMessage("帮我定一个适合新手的题材");
+    await waitFor(() => fake.calls === 1);
+
+    // 事务中连续两条作者消息：先「换方向」，随后「收回」——按到达顺序排空后，最后一条生效（驳回态被清除）
+    await session.sendUserMessage("换个方向再讨论");
+    await session.sendUserMessage("算了，还是按你原来的方向来");
+    const ackCount = events.filter((e) => e.type === "system" && (e.data as { message?: string }).message?.includes("将在当前发言者完成本轮后")).length;
+    expect(ackCount).toBe(2);
+
+    fake.releaseMember();
+    await waitFor(() => session.getStatus() === "completed");
+
+    const agentMsgs = events
+      .filter((e): e is { type: "chat_message"; data: ChatMessageRecord } => e.type === "chat_message")
+      .map((e) => e.data)
+      .filter((m) => m.kind === "agent");
+    expect(agentMsgs.length).toBeGreaterThanOrEqual(2);
+    expect(agentMsgs[0]!.memberName).toBe("题材舵手");
+    // 最后一条非驳回信号清除了驳回态 → 导演选择生效，下一位是魔鬼代言人（而非被强制拉回的题材舵手）
+    expect(agentMsgs[1]!.memberName).toBe("魔鬼代言人");
+    // 整场无「驳回强拉」探针
+    expect(events.some((e) => e.type === "scheduler_probe" && (e.data as Record<string, unknown>).rejectionForced === true)).toBe(false);
+  });
+
+  /** 纯工具循环假 LLM：成员始终调用工具、从不调 finish_turn，兜底由 astream 散文收敛。 */
+  class ToolLoopFakeLLM {
+    directorScript: string[] = [];
+    memberToolCalls: string[] = [];
+    fallbackProse: string[] = [];
+    count_tokens(): number {
+      return 0;
+    }
+    count_text_tokens(text: string): number {
+      return text.length;
+    }
+    async achat(messages: Array<{ role: string; content?: string; name?: string | null }>): Promise<{ content: string; function_call?: { name: string; arguments: string }; model: string }> {
+      const name = (messages[0] as { name?: string | null } | undefined)?.name ?? "角色";
+      if (name === "调度员") {
+        return { content: this.directorScript.shift() ?? "", model: "fake" };
+      }
+      const tool = this.memberToolCalls.shift();
+      if (!tool) return { content: "最终结论正文（散文路径）", model: "fake" };
+      return { content: "", function_call: { name: tool, arguments: "{}" }, model: "fake" };
+    }
+    async *astream(messages: Array<{ role: string; content?: string; name?: string | null }>): AsyncGenerator<string> {
+      const content = this.fallbackProse.shift() ?? "兜底生成的最终结论";
+      for (const ch of content) yield ch;
+    }
+    close(): void {}
+  }
+
+  it("Agent 一直调用工具不调 finish_turn：配额耗尽后强制兜底生成散文结论，会话不卡死", async () => {
+    const events: ChatSessionEvent[] = [];
+    const fake = new ToolLoopFakeLLM();
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "nav", priority: 1, reason: "提案者先给方向" }] }));
+    // 后续轮次剩余<=2 会被收束规则接管，脚本值不影响结果
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "挑刺" }] }));
+    fake.directorScript.push(JSON.stringify({ ranking: [{ member: "dev", priority: 1, reason: "再挑刺" }] }));
+    // maxToolCalls=2 → 循环执行 3 次：3 次 read_worldview，从不调用 finish_turn
+    fake.memberToolCalls.push("read_worldview", "read_worldview", "read_worldview");
+    fake.fallbackProse.push("兜底生成的最终结论：题材确定为都市脑洞+系统流");
+
+    const session = new ChatSession({
+      projectId: "proj-tool-loop",
+      topic: "题材讨论",
+      members: [
+        { id: "nav", kind: "agent", name: "题材舵手", description: "定位题材", category: "proposer", systemPrompt: "你是题材舵手" },
+        { id: "syn", kind: "agent", name: "合成者", description: "收束", category: "synthesizer", systemPrompt: "你是合成者" },
+      ],
+      llm: fake as unknown as LLMClient,
+      now: () => 0,
+      random: () => 0.5,
+      cooldownMs: 10,
+      idleTimeoutMs: 20,
+      maxRounds: 3,
+      maxToolCalls: 2,
+      schedulerAgent: { enabled: true },
+      onEvent: (e) => events.push(e),
+    });
+
+    await session.sendUserMessage("帮我定一个适合新手的题材");
+    await waitFor(() => session.getStatus() === "completed");
+
+    const agentMsgs = events
+      .filter((e): e is { type: "chat_message"; data: ChatMessageRecord } => e.type === "chat_message")
+      .map((e) => e.data)
+      .filter((m) => m.kind === "agent");
+    expect(agentMsgs.length).toBeGreaterThanOrEqual(1);
+    // 配额耗尽后由 astream 兜底产出散文结论（未走 finish_turn）
+    expect(agentMsgs[0]!.memberName).toBe("题材舵手");
+    expect(agentMsgs[0]!.content).toBe("兜底生成的最终结论：题材确定为都市脑洞+系统流");
+    // 工具确实被反复调用（至少 3 次 tool_call），但没有 finish_turn 提交
+    const toolCalls = events.filter((e) => e.type === "tool_call");
+    expect(toolCalls.length).toBeGreaterThanOrEqual(3);
+    expect(toolCalls.every((e) => (e.data as { tool: string }).tool !== "finish_turn")).toBe(true);
   });
 });

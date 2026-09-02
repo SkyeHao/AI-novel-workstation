@@ -1,9 +1,9 @@
-﻿/** API 全局状态管理（TS 版，迁移自 api/state.py）。
+/** API 全局状态管理（TS 版，迁移自 api/state.py）。
  * 模型池 / 任务分配 / 项目目录 / 搜索配置；持久化于 data/app-state.json 与用户配置 .env。 */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { PROJECT_ROOT, getEnvFilePath } from "../config/paths.js";
+import { getEnvFilePath, getDataDir } from "../config/paths.js";
 import { getSettings, type LLMModelConfig } from "../config/settings.js";
 import { LLMClient } from "../llm/client.js";
 import { LLMConfigError, LLMError } from "../llm/exceptions.js";
@@ -26,6 +26,8 @@ interface ModelEntryData {
   max_retries: number;
   status: string;
   last_tested: string | null;
+  /** 是否为系统默认模型：未显式分配任务 / 未指定模型时的全局兜底（同一时刻至多一个） */
+  is_default: boolean;
 }
 
 interface AppStateFile {
@@ -34,11 +36,11 @@ interface AppStateFile {
   assignments: Partial<Record<string, string | null>>;
 }
 
-const STATE_FILE = process.env.AI_NOVEL_STATE_FILE ?? path.join(PROJECT_ROOT, "data", "app-state.json");
+const STATE_FILE = process.env.AI_NOVEL_STATE_FILE ?? path.join(getDataDir(), "app-state.json");
 const ASSIGNMENT_DEFAULTS: Partial<Record<TaskType, string>> = {};
 
 function defaultProjectDir(): string {
-  return path.join(PROJECT_ROOT, "data", "projects");
+  return path.join(getDataDir(), "projects");
 }
 
 function loadState(): AppStateFile {
@@ -51,6 +53,7 @@ function loadState(): AppStateFile {
         assignments: data.assignments ?? {},
       };
       migrateLegacyAssignments(state);
+      migrateDefaultModelFlag(state);
       return state;
     }
   } catch (err) {
@@ -101,14 +104,19 @@ export function getModel(id: string): ModelEntryData | null {
   return _state.models.find((m) => m.id === id) ?? null;
 }
 
-export function createModel(data: Omit<ModelEntryData, "id" | "status" | "last_tested">): ModelEntryData {
+export function createModel(data: Omit<ModelEntryData, "id" | "status" | "last_tested" | "is_default"> & { is_default?: boolean }): ModelEntryData {
   const entry: ModelEntryData = {
     ...data,
     api_key: data.api_key.trim(),
     id: randomUUID(),
     status: "untested",
     last_tested: null,
+    is_default: data.is_default === true || _state.models.length === 0,
   };
+  if (entry.is_default) {
+    // 首个模型自动成为默认；显式设默认时清掉其它模型的默认标记
+    for (const m of _state.models) m.is_default = false;
+  }
   _state.models.push(entry);
   saveState();
   return { ...entry, api_key: maskKey(entry.api_key) };
@@ -122,6 +130,10 @@ export function updateModel(id: string, patch: Partial<Omit<ModelEntryData, "id"
     if (k === "api_key" && String(v).trim() === "") continue; // 留空不修改
     (entry as unknown as Record<string, unknown>)[k] = v;
   }
+  // 把某模型设为默认时，其它模型取消默认（同一时刻至多一个默认）
+  if (patch.is_default === true) {
+    for (const m of _state.models) m.is_default = m.id === id;
+  }
   saveState();
   rebuildAssignedClients();
   return { ...entry, api_key: maskKey(entry.api_key) };
@@ -130,13 +142,53 @@ export function updateModel(id: string, patch: Partial<Omit<ModelEntryData, "id"
 export function deleteModel(id: string): boolean {
   const idx = _state.models.findIndex((m) => m.id === id);
   if (idx < 0) return false;
+  const wasDefault = _state.models[idx]!.is_default === true;
   _state.models.splice(idx, 1);
   for (const key of Object.keys(_state.assignments)) {
     if (_state.assignments[key] === id) _state.assignments[key] = null;
   }
+  if (wasDefault && _state.models.length > 0) {
+    // 默认模型被删后，自动提升列表中第一个模型为默认，保证始终有可用兜底
+    _state.models[0]!.is_default = true;
+  }
   _modelClients.delete(id);
   saveState();
   return true;
+}
+
+// ------------------------------------------------------------------
+// 默认模型
+// ------------------------------------------------------------------
+
+/** 当前系统默认模型 id（无则为 null）。 */
+export function getDefaultModelId(): string | null {
+  const entry = _state.models.find((m) => m.is_default === true);
+  return entry ? entry.id : null;
+}
+
+/** 把指定模型设为系统默认（清除其它模型的默认标记），返回更新后的模型。 */
+export function setDefaultModel(id: string): ModelEntryData | null {
+  const entry = _state.models.find((m) => m.id === id);
+  if (!entry) return null;
+  for (const m of _state.models) m.is_default = m.id === id;
+  saveState();
+  rebuildAssignedClients();
+  return { ...entry, is_default: true, api_key: maskKey(entry.api_key) };
+}
+
+/** 按系统默认模型获取 client；无默认模型时返回 null（调用方自行兜底到 .env 或抛错）。 */
+export function getDefaultModelClient(interaction_logger: InteractionLogger | null = null): LLMClient | null {
+  const id = getDefaultModelId();
+  if (!id) return null;
+  const entry = _state.models.find((m) => m.id === id);
+  if (!entry) return null;
+  if (interaction_logger) return new LLMClient(toConfig(entry), interaction_logger);
+  let client = _modelClients.get(id);
+  if (!client) {
+    client = new LLMClient(toConfig(entry));
+    _modelClients.set(id, client);
+  }
+  return client;
 }
 
 export async function testModel(id: string): Promise<{ success: boolean; message: string; model: string; elapsed_ms: number }> {
@@ -217,25 +269,54 @@ function rebuildAssignedClients(): void {
 
 /** 按任务类型获取 client：优先任务分配，其次 .env 多任务降级链 */
 export function getClientForTask(task: TaskType, interaction_logger: InteractionLogger | null = null): LLMClient {
+  console.log(`[getClientForTask] 获取任务类型: ${task}`);
+  
   const id = _state.assignments[task];
+  console.log(`[getClientForTask] 分配的模型 ID: ${id || 'none'}`);
+  
   if (id) {
     const entry = _state.models.find((m) => m.id === id);
     if (entry) {
-      if (interaction_logger) return new LLMClient(toConfig(entry), interaction_logger);
+      console.log(`[getClientForTask] 找到模型配置: ${entry.name}, model: ${entry.model}, baseUrl: ${entry.base_url}`);
+      console.log(`[getClientForTask] API Key 前 8 位: ${entry.api_key.substring(0, 8)}...`);
+      const config = toConfig(entry);
+      console.log(`[getClientForTask] 转换后的配置: model=${config.model}, baseUrl=${config.baseUrl}, apiKey=${config.apiKey.substring(0, 8)}...`);
+      
+      if (interaction_logger) return new LLMClient(config, interaction_logger);
       let client = _modelClients.get(id);
       if (!client) {
-        client = new LLMClient(toConfig(entry));
+        client = new LLMClient(config);
         _modelClients.set(id, client);
       }
       return client;
+    } else {
+      console.log(`[getClientForTask] 未找到 ID 为 ${id} 的模型`);
     }
   }
+  
+  console.log(`[getClientForTask] 尝试环境变量配置...`);
+  console.log("[getClientForTask] 尝试系统默认模型兜底...");
+  const defaultClient = getDefaultModelClient(interaction_logger);
+  if (defaultClient) {
+    const defEntry = _state.models.find((m) => m.is_default === true);
+    console.log("[getClientForTask] 使用系统默认模型: " + (defEntry ? defEntry.name : "?"));
+    return defaultClient;
+  }
+
   const settings = getSettings();
-  if (settings.getModelConfig(task).apiKey) return getManager().get_client(task);
+  if (settings.getModelConfig(task).apiKey) {
+    console.log(`[getClientForTask] 使用环境变量配置`);
+    return getManager().get_client(task);
+  }
+  
   // 兜底：任意已配置的任务
   for (const t of ["text", "structure", "check"] as TaskType[]) {
-    if (settings.getModelConfig(t).apiKey) return getManager().get_client(t);
+    if (settings.getModelConfig(t).apiKey) {
+      console.log(`[getClientForTask] 兜底使用任务类型 ${t} 的配置`);
+      return getManager().get_client(t);
+    }
   }
+  
   throw new LLMConfigError("没有可用的 LLM client：请在设置页配置模型 API Key，或在项目初始化时配置");
 }
 
@@ -246,6 +327,19 @@ export function hasAnyClient(): boolean {
   } catch {
     return false;
   }
+}
+
+/** 按模型 id 获取 client（导演专用模型等）；模型不存在返回 null，由调用方回退到讨论同款。 */
+export function getClientByModelId(id: string, interaction_logger: InteractionLogger | null = null): LLMClient | null {
+  const entry = _state.models.find((m) => m.id === id);
+  if (!entry) return null;
+  if (interaction_logger) return new LLMClient(toConfig(entry), interaction_logger);
+  let client = _modelClients.get(id);
+  if (!client) {
+    client = new LLMClient(toConfig(entry));
+    _modelClients.set(id, client);
+  }
+  return client;
 }
 
 /** ????text/structure/check?? ????????????????? */
@@ -269,6 +363,26 @@ function migrateLegacyAssignments(state: { assignments: Partial<Record<string, s
   if (changed) {
     fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
     fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), "utf-8");
+  }
+}
+
+/** 兼容旧数据：为没有 is_default 字段的模型补标记；无默认模型时把第一个模型设为默认。 */
+function migrateDefaultModelFlag(state: AppStateFile): void {
+  if (!Array.isArray(state.models) || state.models.length === 0) return;
+  let changed = false;
+  for (const m of state.models) {
+    if (typeof m.is_default !== "boolean") {
+      m.is_default = false;
+      changed = true;
+    }
+  }
+  if (!state.models.some((m) => m.is_default === true)) {
+    state.models[0]!.is_default = true;
+    changed = true;
+  }
+  if (changed) {
+    fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ project_dir: state.project_dir, models: state.models, assignments: state.assignments }, null, 2), "utf-8");
   }
 }
 
@@ -302,6 +416,8 @@ export function getClientForState(stateKey: string, interaction_logger: Interact
       return client;
     }
   }
+  const defaultClient = getDefaultModelClient(interaction_logger);
+  if (defaultClient) return defaultClient;
   const settings = getSettings();
   if (settings.getModelConfig(legacyTask).apiKey) return getManager().get_client(legacyTask as TaskType);
   for (const t of ["text", "structure", "check"] as TaskType[]) {
@@ -458,4 +574,6 @@ export const PROVIDERS: Array<{ id: string; name: string; base_url: string; mode
 export function getClient(): never {
   throw new LLMError("请使用 getClientForTask");
 }
+
+
 

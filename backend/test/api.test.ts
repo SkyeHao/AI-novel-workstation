@@ -107,7 +107,7 @@ describe("api（ADR-0005 集成）", () => {
     const list = JSON.parse(listRes.body);
     expect(list.length).toBe(7);
     expect(list.map((a: { state: string }) => a.state)).toEqual([
-      "ideation", "worldview", "characters", "outline", "writing", "review", "foreshadow",
+      "ideation", "worldview", "characters", "outline", "writing", "review", "style",
     ]);
 
     // 给 writing 状态分配模型
@@ -150,4 +150,3 @@ describe("api（ADR-0005 集成）", () => {
     expect(JSON.parse(mark.body).status).toBe("reaped");
   });
 });
-

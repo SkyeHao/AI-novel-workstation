@@ -72,7 +72,7 @@ export class ListStatesTool extends AbstractTool {
   }
 
   readonly name = "list_states";
-  readonly description = "列出本书可用的创作状态（创意孵化/世界观/人物/章纲/正文/审阅/伏笔管理）及当前处于哪个状态。";
+  readonly description = "列出本书可用的创作状态（灵感捕捉/世界观构建/人物塑造/大纲生成/正文生成/质量审查/文风优化）及当前处于哪个状态。";
   readonly parameters = [];
 
   async execute(): Promise<ToolResult> {
@@ -97,7 +97,7 @@ export class SwitchStateTool extends AbstractTool {
   readonly name = "switch_state";
   readonly description =
     "切换当前小说级创作状态并重置 Agent 上下文组装规则，使后续对话聚焦于该状态的创作内容。" +
-    "合法状态 key：ideation/worldview/characters/outline/writing/review/foreshadow。";
+    "合法状态 key：ideation/worldview/characters/outline/writing/review/style。";
   readonly parameters = [
     { name: "state", type: "string", description: "目标状态 key", required: true, default: null },
     { name: "work_unit", type: "string", description: "可选：同步指定工作单元（如 ch3）", required: false, default: null },
@@ -106,7 +106,7 @@ export class SwitchStateTool extends AbstractTool {
   async execute(kwargs: Record<string, unknown>): Promise<ToolResult> {
     const target = String(kwargs.state ?? "").trim();
     if (!target) return new ToolResult(false, "", "state 不能为空");
-    const allowed = ["ideation", "worldview", "characters", "outline", "writing", "review", "foreshadow"];
+    const allowed = ["ideation", "worldview", "characters", "outline", "writing", "review", "style"];
     if (!allowed.includes(target)) {
       return new ToolResult(false, "", `非法状态 key: ${target}，合法值: ${allowed.join("/")}`);
     }

@@ -1,8 +1,9 @@
-﻿/** 项目存储（TS 版，迁移自 storage/project_store.py）。 */
+/** 项目存储（TS 版，迁移自 storage/project_store.py）。 */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { safeResolve } from "./path_safety.js";
+import type { CharacterDimension } from "../assets/character_state_templates.js";
 
 export const STATUS_IDEATION = "ideation";
 export const STATUS_SETTING = "setting";
@@ -47,6 +48,7 @@ export interface ProjectData {
   states_enabled: string[];
   created_at: string;
   updated_at: string;
+  character_dimensions?: CharacterDimension[];
 }
 
 function nowSeconds(): string {
@@ -65,6 +67,7 @@ export class Project {
   states_enabled: string[];
   created_at: string;
   updated_at: string;
+  character_dimensions: CharacterDimension[];
 
   constructor(init: {
     name: string;
@@ -78,6 +81,7 @@ export class Project {
     states_enabled?: string[];
     created_at?: string | null;
     updated_at?: string | null;
+    character_dimensions?: CharacterDimension[];
   }) {
     const now = nowSeconds();
     this.id = init.id || randomUUID();
@@ -91,6 +95,7 @@ export class Project {
     this.states_enabled = init.states_enabled ?? [];
     this.created_at = init.created_at ?? now;
     this.updated_at = init.updated_at ?? now;
+    this.character_dimensions = init.character_dimensions ?? [];
   }
 
   toDict(): ProjectData {
@@ -106,6 +111,7 @@ export class Project {
       states_enabled: this.states_enabled,
       created_at: this.created_at,
       updated_at: this.updated_at,
+      character_dimensions: this.character_dimensions,
     };
   }
 
@@ -122,6 +128,9 @@ export class Project {
       states_enabled: Array.isArray(data.states_enabled) ? (data.states_enabled as string[]) : [],
       created_at: (data.created_at as string | null) ?? null,
       updated_at: (data.updated_at as string | null) ?? null,
+      character_dimensions: Array.isArray(data.character_dimensions)
+        ? (data.character_dimensions as CharacterDimension[])
+        : [],
     });
   }
 }
@@ -251,6 +260,7 @@ export function initDirectories(root: string): void {
     fs.mkdirSync(path.join(root, sub), { recursive: true });
   }
 }
+
 
 
 

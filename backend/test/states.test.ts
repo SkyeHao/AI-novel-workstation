@@ -1,17 +1,18 @@
 ﻿import { describe, expect, it } from "vitest";
 import {
   DEFAULT_STATES,
-  STATE_FORESHADOW,
   getStateNode,
   getStatesByKeys,
   legacyStatusToNew,
 } from "../src/storage/states.js";
 
 describe("states（T1）", () => {
-  it("默认 7 状态，伏笔为横切且默认关闭", () => {
+  it("默认 7 个流程节点，伏笔不再作为独立横切节点", () => {
     expect(DEFAULT_STATES.length).toBe(7);
-    const f = DEFAULT_STATES.find((s) => s.key === STATE_FORESHADOW);
-    expect(f?.enabled).toBe(false);
+    expect(DEFAULT_STATES.map((s) => s.key)).toEqual([
+      "ideation", "worldview", "characters", "outline", "writing", "review", "style",
+    ]);
+    expect(DEFAULT_STATES.some((s) => s.key === "foreshadow")).toBe(false);
   });
 
   it("legacyStatusToNew 完成旧状态映射", () => {
@@ -23,7 +24,7 @@ describe("states（T1）", () => {
   });
 
   it("getStateNode 未知 key 回退创意孵化", () => {
-    expect(getStateNode("writing").label).toBe("正文");
+    expect(getStateNode("writing").label).toBe("正文生成");
     expect(getStateNode("nope").key).toBe("ideation");
   });
 

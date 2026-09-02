@@ -1,9 +1,11 @@
-/**
+﻿/**
  * AI 小说工作站后端入口（TS，ADR-0006 / ADR-0005）。
  */
 import Fastify, { type FastifyInstance } from "fastify";
 import { pathToFileURL } from "node:url";
+import * as path from "node:path";
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import { initSearchEnv } from "./api/state.js";
 import { projectsRoutes } from "./api/routes/projects.js";
 import { configRoutes } from "./api/routes/config.js";
@@ -14,10 +16,13 @@ import { interactionsRoutes } from "./api/routes/interactions.js";
 import { agentRoutes } from "./api/routes/agent.js";
 import { agentRolesRoutes } from "./api/routes/agent_roles.js";
 import { chatSessionsRoutes } from "./api/routes/chat_sessions.js";
+import { promptsRoutes } from "./api/routes/prompts.js";
+import { roundtableConfigRoutes } from "./api/routes/roundtable_config.js";
 
 export interface BuildAppOptions {
   logger?: boolean;
   projectDir?: string | null;
+  staticDir?: string;
 }
 
 export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInstance> {
@@ -50,16 +55,36 @@ export async function buildApp(opts: BuildAppOptions = {}): Promise<FastifyInsta
   await app.register(agentRoutes, { prefix: "/api/agent" });
   await app.register(agentRolesRoutes, { prefix: "/api/agent-roles" });
   await app.register(chatSessionsRoutes, { prefix: "/api/chat-sessions" });
+  await app.register(promptsRoutes, { prefix: "/api/prompts" });
+  await app.register(roundtableConfigRoutes, { prefix: "/api/roundtable-config" });
+
+  if (opts.staticDir) {
+    await app.register(fastifyStatic, { root: opts.staticDir });
+    app.setNotFoundHandler((req, reply) => {
+      if (req.url?.startsWith("/api")) {
+        return reply.code(404).send({ error: "Not Found" });
+      }
+      return reply.type("text/html").sendFile("index.html");
+    });
+  }
 
   return app;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const app = await buildApp();
+  const app = await buildApp({
+    staticDir: process.env.NOVEL_STATIC_DIR ? path.resolve(process.env.NOVEL_STATIC_DIR) : undefined,
+  });
   const port = Number(process.env.PORT ?? 8000);
   await app.listen({ port, host: "127.0.0.1" });
-  console.log(`[ts-backend] listening on http://127.0.0.1:${port}`);
+  const address = app.server.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+  console.log(`[ts-backend] listening on http://127.0.0.1:${actualPort}`);
+  if (process.env.NOVEL_DESKTOP === "1") {
+    console.log(`NOVEL_PORT=${actualPort}`);
+  }
 }
+
 
 
 

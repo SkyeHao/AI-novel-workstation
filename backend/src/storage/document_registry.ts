@@ -27,6 +27,7 @@ export const DOCUMENT_KINDS: DocumentKind[] = [
   "chapter",
   "review",
   "style",
+  "plan",
 ];
 
 export interface DocumentEntry {
@@ -211,6 +212,24 @@ export class DocumentRegistry {
     const entries: DocumentEntry[] = [];
     const root = this._projectStore.project_root(projectId);
     for (const kind of DOCUMENT_KINDS) {
+      if (kind === "plan") {
+        const dir = path.join(root, "memory", "discussions");
+        if (fs.existsSync(dir)) {
+          for (const f of fs.readdirSync(dir)) {
+            if (!/^方案-.+\.md$/.test(f)) continue;
+            const full = path.join(dir, f);
+            if (!fs.statSync(full).isFile()) continue;
+            entries.push({
+              kind,
+              title: f.replace(/\.md$/, ""),
+              path: "memory/discussions/" + f,
+              work_unit: null,
+              modified: fs.statSync(full).mtimeMs,
+            });
+          }
+        }
+        continue;
+      }
       if (!isWorkUnitKind(kind)) {
         const fileName = STATIC_DOC_FILES[kind]!;
         const full = path.join(root, fileName);

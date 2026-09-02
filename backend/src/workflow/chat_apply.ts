@@ -64,20 +64,31 @@ function extractJson(text: string): Record<string, unknown> | null {
   }
 }
 
-/** 组装参考文档 markdown。 */
+/** 组装参考文档 markdown（固定格式） */
 function buildPlanMarkdown(opts: ChatApplyOptions): string {
   const now = new Date().toISOString();
-  const lines: string[] = [];
-  lines.push("# 群聊讨论方案：" + opts.topic);
-  lines.push("");
-  lines.push("> 讨论会话：" + opts.sessionId);
-  lines.push("> 生成时间：" + now);
-  lines.push("");
-  lines.push("---");
-  lines.push("");
-  lines.push(opts.summary.trim());
-  lines.push("");
-  return lines.join("\n");
+  const topic = String(opts.topic ?? "").trim() || "未命名讨论";
+  const shortId = String(opts.sessionId ?? "").slice(0,8);
+  const header = [
+    "# 群聊讨论方案：" + topic,
+    "",
+    "> 类型：多 Agent 圆桌会议",
+    "> 讨论会话：" + opts.sessionId + (shortId ? "（#" + shortId + "）" : ""),
+    "> 生成时间：" + now,
+    "> 参与成员：圆桌成员与作者（详见会话记录）",
+    "",
+    "---",
+    "",
+  ].join("\n");
+  const raw = String(opts.summary ?? "").trim();
+  let body = raw || "（暂无内容）";
+  const required = ["## 核心共识", "## 主要分歧", "## 综合方案", "## 行动建议"];
+  const missing = required.filter(h => !body.includes(h));
+  if (missing.length>0 && raw) {
+    const filler = missing.map(h=> h + "\n\n> （本节在合成输出中缺失，请结合讨论记录补充）").join("\n\n");
+    body = body + "\n\n---\n\n" + filler;
+  }
+  return header + body + "\n";
 }
 
 function applyAsDocument(opts: ChatApplyOptions): ChatApplyResult {

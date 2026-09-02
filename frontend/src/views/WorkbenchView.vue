@@ -1,294 +1,427 @@
-﻿<template>
-  <div class="workbench-page">
-    <div class="page-head">
-      <div>
-        <h2 class="page-title">工作台 · {{ project?.name }}</h2>
-        <p class="page-subtitle">小说级状态演进周期与项目总览</p>
+<template>
+  <div class="workbench-view">
+    <PageHeader title="工作台" subtitle="创作引擎运行状态与项目总览" icon="Monitor">
+      <template #actions>
+        <el-button type="primary" @click="goTo('agent')">
+          <el-icon style="margin-right: 6px"><MagicStick /></el-icon>
+          进入创作引擎
+        </el-button>
+      </template>
+    </PageHeader>
+
+    <div class="stat-grid cols-4">
+      <div class="stat-card">
+        <div class="stat-card-icon"><el-icon><Switch /></el-icon></div>
+        <div class="stat-card-info">
+          <div class="stat-card-value">{{ currentStateLabel || '—' }}</div>
+          <div class="stat-card-label">当前流程节点</div>
+        </div>
       </div>
-      <el-button type="primary" @click="goAgent">
-        <el-icon style="margin-right: 6px"><ChatDotRound /></el-icon>
-        进入 Agent 窗口
-      </el-button>
+      <div class="stat-card">
+        <div class="stat-card-icon"><el-icon><Operation /></el-icon></div>
+        <div class="stat-card-info">
+          <div class="stat-card-value">{{ enabledStateCount }}</div>
+          <div class="stat-card-label">已启用节点</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-icon"><el-icon><Briefcase /></el-icon></div>
+        <div class="stat-card-info">
+          <div class="stat-card-value stat-value-ellipsis" :title="workUnit">{{ workUnit || '—' }}</div>
+          <div class="stat-card-label">当前工作单元</div>
+        </div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-icon"><el-icon><Cpu /></el-icon></div>
+        <div class="stat-card-info">
+          <div class="stat-card-value">{{ runtimeLogs.length }}</div>
+          <div class="stat-card-label">引擎运行记录</div>
+        </div>
+      </div>
     </div>
 
-    <el-alert
-      v-if="!prereq.complete && loaded"
-      type="warning"
-      :closable="false"
-      show-icon
-      style="margin-bottom: 16px"
-    >
-      <template #title>
-        前置设定不完整：{{ prereq.missing.join('、') }}。可先在 Agent 窗口生成，或到对应状态面板补全。
-      </template>
-    </el-alert>
-
-    <!-- 状态演进周期（T1） -->
-    <el-card shadow="never" class="block-card">
-      <template #header>
-        <div class="card-head">
-          <span>状态演进周期</span>
-          <el-button link type="primary" size="small" @click="openStatesConfig">
-            配置本书启用的状态
-          </el-button>
-        </div>
-      </template>
-      <div class="state-steps">
-        <div
-          v-for="s in states"
-          :key="s.key"
-          class="state-step"
-          :class="{ current: s.key === currentState, disabled: !s.enabled_in_project }"
-          @click="switchState(s.key)"
-        >
-          <div class="state-dot" :style="{ background: stateColor(s.key) }">
-            <el-icon v-if="s.key === currentState"><Check /></el-icon>
+    <div class="workbench-grid">
+      <!-- 当前节点状态 -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title-group">
+            <el-icon class="panel-title-icon"><Switch /></el-icon>
+            <span class="panel-title">当前节点状态</span>
           </div>
-          <div class="state-label">{{ s.label }}</div>
-          <div class="state-key">{{ s.key }}</div>
+          <el-tag size="small" type="primary" effect="light" round>{{ currentState || '未定义' }}</el-tag>
+        </div>
+        <div class="panel-body">
+          <div class="state-hero" :style="{ borderColor: stateColor(currentState) }">
+            <div class="state-dot" :style="{ background: stateColor(currentState) }"></div>
+            <div class="state-hero-info">
+              <div class="state-hero-label">{{ currentStateLabel || '未知节点' }}</div>
+              <div class="state-hero-key mono">{{ currentState || '—' }}</div>
+            </div>
+          </div>
+          <div class="state-switch">
+            <span class="state-switch-label">流程节点</span>
+            <FlowStepper
+              :nodes="stateFlow.map(s => ({ key: s.key, label: s.label }))"
+              :current-key="currentState"
+              :completed-keys="stateFlow.filter(s => s.index < stateProgressIndex).map(s => s.key)"
+              clickable
+              @select="handleNodeSelect"
+            />
+          </div>
         </div>
       </div>
-    </el-card>
 
-    <el-collapse v-model="wbPanels" class="group-collapse mt-16">
-      <el-collapse-item name="info">
-        <template #title>
-          <div class="collapse-title">
-            <el-icon><InfoFilled /></el-icon>
-            <span>项目信息</span>
-            <span class="collapse-count">书名 / 题材 / 平台 / 目标字数 / 工作单元 / 核心梗</span>
+      <!-- 引擎运行记录 -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title-group">
+            <el-icon class="panel-title-icon"><List /></el-icon>
+            <span class="panel-title">引擎运行记录</span>
           </div>
-        </template>
-        <el-form label-width="72px" size="small">
-            <el-form-item label="书名"><el-input v-model="project.name" @change="saveMeta" /></el-form-item>
-            <el-form-item label="题材"><el-input v-model="project.genre" placeholder="主+副，如 玄幻+系统流" @change="saveMeta" /></el-form-item>
-            <el-form-item label="平台"><el-input v-model="project.platform" placeholder="番茄/起点/…" @change="saveMeta" /></el-form-item>
-            <el-form-item label="目标字数">
-              <el-input-number v-model="project.target_words" :min="0" :step="100000" style="width: 100%" @change="saveMeta" />
-            </el-form-item>
-            <el-form-item label="工作单元"><el-input v-model="project.work_unit" placeholder="如 ch3" @change="saveMeta" /></el-form-item>
-            <el-form-item label="核心梗">
-              <el-input v-model="project.idea" type="textarea" :rows="3" @change="saveMeta" />
-            </el-form-item>
-          </el-form>
-          <el-divider />
-          <div class="stat-grid">
-            <div class="stat"><span class="num">{{ memoryStats.facts }}</span><span class="label">正典事实</span></div>
-            <div class="stat"><span class="num">{{ memoryStats.foreshadow }}</span><span class="label">伏笔</span></div>
-            <div class="stat"><span class="num">{{ memoryStats.characters }}</span><span class="label">人物</span></div>
-            <div class="stat"><span class="num">{{ memoryStats.summaries }}</span><span class="label">摘要层</span></div>
+          <div class="panel-actions">
+            <el-button link type="primary" size="small" @click="goTo('agent')">查看详情</el-button>
           </div>
-      </el-collapse-item>
-      <el-collapse-item name="core">
-        <template #title>
-          <div class="collapse-title">
-            <el-icon><DataAnalysis /></el-icon>
-            <span>核心要素</span>
-            <span class="collapse-count">唯一事实源（可在 Agent 窗口共创生成）</span>
+        </div>
+        <div class="panel-body">
+          <div v-if="runtimeLogs.length === 0" class="app-empty panel-empty">
+            <el-icon :size="22"><List /></el-icon>
+            <span>暂无运行记录</span>
           </div>
-        </template>
-        <pre v-if="coreElementsText" class="json-pre">{{ coreElementsText }}</pre>
-          <el-empty v-else description="尚未生成核心要素，可在 Agent 窗口中与 Agent 共创生成" :image-size="60" />
-      </el-collapse-item>
-      <el-collapse-item name="docs">
-        <template #title>
-          <div class="collapse-title">
-            <el-icon><FolderOpened /></el-icon>
-            <span>项目文档</span>
-            <span class="collapse-count">设定 / 记忆 / 审阅产物</span>
+          <div v-else class="logs-list">
+            <div v-for="log in runtimeLogs.slice(0, 5)" :key="log.id" class="log-item">
+              <span class="log-time mono">{{ formatTime(log.timestamp) }}</span>
+              <span class="log-node">{{ log.node }}</span>
+              <span class="log-action">{{ log.action }}</span>
+            </div>
           </div>
-        </template>
-        <el-table :data="documents" size="small" max-height="360">
-            <el-table-column prop="name" label="文档" show-overflow-tooltip />
-            <el-table-column label="操作" width="90">
-              <template #default="{ row }">
-                <el-button link type="primary" size="small" @click="openDoc(row)">查看</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
-      </el-collapse-item>
-    </el-collapse>
-
-    <!-- 状态配置对话框 -->
-    <el-dialog v-model="statesConfigVisible" title="配置本书启用的状态（可扩展）" width="460px">
-      <p class="tip">预置 7 个状态，可按本书需要增删启用。伏笔管理为横切可选状态。</p>
-      <el-checkbox-group v-model="enabledStates">
-        <el-checkbox v-for="s in allStates" :key="s.key" :label="s.key" :value="s.key" style="display: block; margin-bottom: 8px">
-          {{ s.label }} <span class="muted">（{{ s.key }}）</span>
-        </el-checkbox>
-      </el-checkbox-group>
-      <template #footer>
-        <el-button @click="statesConfigVisible = false">取消</el-button>
-        <el-button type="primary" :loading="savingStates" @click="saveStatesConfig">保存</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 文档预览 -->
-    <el-dialog v-model="docVisible" :title="currentDoc?.name ?? '文档'" width="720px" top="6vh">
-      <div class="doc-content">
-        <MarkdownView v-if="currentDocContent" :content="currentDocContent" />
+        </div>
       </div>
-    </el-dialog>
+
+      <!-- 设定完成度 -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title-group">
+            <el-icon class="panel-title-icon"><DataAnalysis /></el-icon>
+            <span class="panel-title">设定完成度</span>
+          </div>
+          <el-tag size="small" type="info" effect="plain">参考值</el-tag>
+        </div>
+        <div class="panel-body">
+          <div class="completion-stats">
+            <div v-for="stat in completionStats" :key="stat.key" class="completion-item">
+              <div class="completion-row">
+                <span class="completion-label">{{ stat.label }}</span>
+                <span class="completion-pct mono">{{ stat.percentage }}%</span>
+              </div>
+              <el-progress :percentage="stat.percentage" :show-text="false" :status="stat.percentage === 100 ? 'success' : ''" :stroke-width="8" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 题材与人物状态维度 -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title-group">
+            <el-icon class="panel-title-icon"><User /></el-icon>
+            <span class="panel-title">题材与人物状态维度</span>
+          </div>
+          <el-tag size="small" type="primary" effect="plain" round>{{ projectGenre || '未设定题材' }}</el-tag>
+        </div>
+        <div class="panel-body">
+          <div v-if="templateInfo" class="genre-desc">{{ templateInfo.description }}</div>
+          <div class="dims-hint">人物动态状态随题材变化：自定义维度优先，留空则使用题材模板；Agent 仍可自由写入额外字段。</div>
+          <div v-if="customDims.length === 0 && templateInfo" class="block-label">题材模板维度</div>
+          <div v-if="customDims.length === 0 && templateInfo" class="template-dims">
+            <span v-for="d in templateInfo.dimensions" :key="d.key" class="dim-chip" :class="{ 'dim-core': d.core }">{{ d.label }}<template v-if="d.core">*</template></span>
+          </div>
+          <div v-if="customDims.length > 0" class="block-label">自定义维度</div>
+          <div v-if="customDims.length > 0" class="custom-dims">
+            <div v-for="(dim, i) in customDims" :key="i" class="dim-row">
+              <el-input v-model="dim.key" placeholder="字段名" size="small" class="dim-key" />
+              <el-input v-model="dim.label" placeholder="中文名" size="small" class="dim-label" />
+              <el-input v-model="dim.hint" placeholder="说明" size="small" class="dim-hint" />
+              <el-button link type="danger" @click="removeDim(i)"><el-icon><Delete /></el-icon></el-button>
+            </div>
+          </div>
+          <div class="dim-actions">
+            <el-button size="small" @click="addDim"><el-icon><Plus /></el-icon>{{ customDims.length ? '新增维度' : '自定义维度' }}</el-button>
+            <el-button v-if="customDims.length > 0" size="small" @click="resetToTemplate">恢复题材模板</el-button>
+            <el-button v-if="customDims.length > 0" size="small" type="primary" :loading="savingDims" @click="saveDims">保存</el-button>
+          </div>
+        </div>
+      </div>
+      <!-- 快速入口 -->
+      <div class="panel">
+        <div class="panel-head">
+          <div class="panel-title-group">
+            <el-icon class="panel-title-icon"><Connection /></el-icon>
+            <span class="panel-title">快速入口</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="quick-links">
+            <div class="quick-link" v-for="link in quickLinks" :key="link.name" @click="goTo(link.name)">
+              <div class="quick-link-icon"><el-icon><component :is="link.icon" /></el-icon></div>
+              <div class="quick-link-info">
+                <span class="quick-link-title">{{ link.title }}</span>
+                <span class="quick-link-desc">{{ link.desc }}</span>
+              </div>
+              <el-icon class="quick-link-arrow"><ArrowRight /></el-icon>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import MarkdownView from '@/components/MarkdownView.vue'
 import {
-  getProject, updateProject, getProjectStates, switchProjectState, updateStatesConfig,
-  getProjectMemory, getProjectDocuments, readProjectDocument, getPrereqCheck, getCoreElements,
-  type Project, type StateNode,
+  getProject,
+  getProjectStates,
+  getCharacterStateTemplates,
+  updateProject,
+  type CharacterStateTemplate,
+  type CharacterDimension,
 } from '@/api'
+import PageHeader from '@/components/PageHeader.vue'
 
 const route = useRoute()
 const router = useRouter()
 const projectId = route.params.id as string
 
-const project = reactive<Project>({
-  id: projectId, name: '', status: 'ideation', target_words: 0, platform: '', genre: '', idea: '',
-  work_unit: '', states_enabled: [], created_at: '', updated_at: '',
+const currentState = ref('')
+const currentStateLabel = ref('')
+const workUnit = ref('')
+const stateFlow = ref<{ key: string; label: string; index: number; enabled?: boolean }[]>([])
+const runtimeLogs = ref<any[]>([])
+const completionStats = ref<any[]>([])
+const projectGenre = ref('')
+const templateInfo = ref<CharacterStateTemplate | null>(null)
+const customDims = ref<CharacterDimension[]>([])
+const savingDims = ref(false)
+
+const STATE_FLOW_BASE = [
+  { key: 'ideation', label: '灵感捕捉' },
+  { key: 'worldview', label: '世界观构建' },
+  { key: 'characters', label: '人物塑造' },
+  { key: 'outline', label: '大纲生成' },
+  { key: 'writing', label: '正文生成' },
+  { key: 'review', label: '质量审查' },
+  { key: 'style', label: '文风优化' },
+]
+
+const quickLinks = [
+  { name: 'static-settings', title: '静态设定', desc: '愿景 · 世界观 · 人物 · 大纲 · 风格', icon: 'Notebook' },
+  { name: 'dynamic-settings', title: '动态设定', desc: '人物状态 · 地点 · 物品 · 事件 · 伏笔', icon: 'DataBoard' },
+  { name: 'agent', title: '创作引擎', desc: '与 Agent 对话推进创作', icon: 'MagicStick' },
+  { name: 'reading', title: '正文阅读', desc: '章节内容与章尾钩子', icon: 'Reading' },
+]
+
+const enabledStateCount = computed(() => stateFlow.value.filter((s) => s.enabled !== false).length)
+
+const stateProgressIndex = computed(() => {
+  const idx = stateFlow.value.findIndex((s) => s.key === currentState.value)
+  return idx >= 0 ? idx : -1
 })
-const loaded = ref(false)
-const states = ref<StateNode[]>([])
-const currentState = ref('ideation')
-const prereq = reactive<{ complete: boolean; missing: string[] }>({ complete: true, missing: [] })
-const memoryStats = reactive({ facts: 0, foreshadow: 0, characters: 0, summaries: 0 })
-const coreElementsText = ref('')
-const documents = ref<Array<{ name: string; path: string; size: number; modified: number }>>([])
-const docVisible = ref(false)
-const currentDoc = ref<{ name: string; path: string } | null>(null)
-const currentDocContent = ref('')
-
-const wbPanels = ref(['info'])
-const statesConfigVisible = ref(false)
-const allStates = ref<StateNode[]>([])
-const enabledStates = ref<string[]>([])
-const savingStates = ref(false)
-
-async function load() {
-  const res = await getProject(projectId)
-  Object.assign(project, res.data)
-  const st = await getProjectStates(projectId)
-  states.value = st.data.states
-  currentState.value = st.data.current_state
-  const pc = await getPrereqCheck(projectId)
-  prereq.complete = pc.data.complete
-  prereq.missing = pc.data.missing
-  const mem = await getProjectMemory(projectId)
-  Object.assign(memoryStats, mem.data.stats)
-  const ce = await getCoreElements(projectId)
-  coreElementsText.value = ce.data.exists && Object.keys(ce.data.data).length ? JSON.stringify(ce.data.data, null, 2) : ''
-  const docs = await getProjectDocuments(projectId)
-  documents.value = docs.data.documents
-  loaded.value = true
-}
-
-async function saveMeta() {
-  try {
-    const res = await updateProject(projectId, {
-      name: project.name, genre: project.genre, platform: project.platform,
-      target_words: project.target_words, idea: project.idea, work_unit: project.work_unit,
-    })
-    Object.assign(project, res.data)
-    ElMessage.success('已保存')
-  } catch (err: any) {
-    ElMessage.error(err?.response?.data?.error || '保存失败')
-  }
-}
-
-async function switchState(key: string) {
-  const s = states.value.find((x) => x.key === key)
-  if (!s || s.enabled_in_project === false) return
-  try {
-    const res = await switchProjectState(projectId, key)
-    currentState.value = res.data.current_state
-    ElMessage.success(`已切换到 ${res.data.label}`)
-  } catch (err: any) {
-    ElMessage.error(err?.response?.data?.error || '切换失败')
-  }
-}
 
 function stateColor(key: string): string {
   const map: Record<string, string> = {
-    ideation: '#4f8cff', worldview: '#6f5cff', characters: '#00b578', outline: '#ff9f43',
-    writing: '#eb5757', review: '#f5222d', foreshadow: '#722ed1',
+    ideation: '#6366f1', worldview: '#4f46e5', characters: '#00b578',
+    outline: '#ff9f43', writing: '#eb5757', review: '#ef4444', style: '#8b5cf6',
   }
   return map[key] || '#909399'
 }
 
-function openStatesConfig() {
-  allStates.value = states.value.map((s) => ({ ...s, enabled_in_project: undefined }))
-  enabledStates.value = states.value.filter((s) => s.enabled_in_project !== false).map((s) => s.key)
-  statesConfigVisible.value = true
+function formatTime(timestamp: string): string {
+  if (!timestamp) return '-'
+  return new Date(timestamp).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
 }
 
-async function saveStatesConfig() {
-  savingStates.value = true
+function goTo(name: string) {
+  router.push('/projects/' + projectId + '/' + name)
+}
+
+function handleNodeSelect(key: string) {
+  // 可以在这里添加节点切换逻辑，如调用switchState API
+  console.log('选择节点:', key)
+}
+
+function matchCharacterStateTemplate(list: CharacterStateTemplate[], genre: string): CharacterStateTemplate | null {
+  const key = (genre || '').trim()
+  if (!key) return list.find((t) => t.id === 'generic') || list[list.length - 1] || null
+  return (
+    list.find((t) => t.label === key || t.id === key || t.label.includes(key) || key.includes(t.label)) ||
+    list.find((t) => t.id === 'generic') ||
+    list[list.length - 1] ||
+    null
+  )
+}
+
+function addDim() {
+  customDims.value.push({ key: '', label: '', hint: '' })
+}
+
+function removeDim(index: number) {
+  customDims.value.splice(index, 1)
+}
+
+function resetToTemplate() {
+  customDims.value = []
+}
+
+async function saveDims() {
+  const cleaned = customDims.value
+    .map((d) => ({ key: d.key.trim(), label: d.label.trim() || d.key.trim(), hint: d.hint.trim() }))
+    .filter((d) => d.key)
+  savingDims.value = true
   try {
-    const res = await updateStatesConfig(projectId, { states_enabled: enabledStates.value })
-    project.states_enabled = res.data.states_enabled
-    ElMessage.success('已保存状态配置')
-    statesConfigVisible.value = false
-    await load()
-  } catch (err: any) {
-    ElMessage.error(err?.response?.data?.error || '保存失败')
+    await updateProject(projectId, { character_dimensions: cleaned })
+    customDims.value = cleaned
+    ElMessage.success('人物状态维度已保存')
+  } catch (e: any) {
+    ElMessage.error('保存失败: ' + (e?.message || e))
   } finally {
-    savingStates.value = false
+    savingDims.value = false
   }
 }
 
-async function openDoc(doc: { name: string; path: string }) {
-  currentDoc.value = doc
-  const res = await readProjectDocument(projectId, doc.path)
-  currentDocContent.value = res.data.content
-  docVisible.value = true
-}
-
-function goAgent() {
-  router.push(`/projects/${projectId}/agent`)
-}
-
-onMounted(() => {
-  load().catch((err: any) => ElMessage.error(err?.response?.data?.error || '加载失败'))
+onMounted(async () => {
+  try {
+    const res = await getProjectStates(projectId)
+    currentState.value = res.data.current_state
+    currentStateLabel.value = res.data.current_label || res.data.current_state
+    workUnit.value = res.data.work_unit || ''
+    const enabled = res.data.states || []
+    stateFlow.value = STATE_FLOW_BASE.map((s, i) => ({
+      ...s,
+      index: i,
+      enabled: !enabled.length || enabled.some((e: any) => e?.key === s.key || e === s.key),
+    }))
+    runtimeLogs.value = []
+    completionStats.value = [
+      { key: 'vision', label: '故事愿景', percentage: 0 },
+      { key: 'worldview', label: '世界观构建', percentage: 0 },
+      { key: 'characters', label: '人物塑造', percentage: 0 },
+      { key: 'outline', label: '大纲', percentage: 0 },
+      { key: 'style', label: '风格规范', percentage: 0 },
+    ]
+    try {
+      const proj = await getProject(projectId)
+      projectGenre.value = proj.data?.genre || ''
+      customDims.value = proj.data?.character_dimensions || []
+    } catch {
+      // 忽略：拿不到项目信息时保持默认
+    }
+    try {
+      const tmpl = await getCharacterStateTemplates()
+      templateInfo.value = matchCharacterStateTemplate(tmpl.data || [], projectGenre.value)
+    } catch {
+      templateInfo.value = null
+    }
+  } catch (err) {
+    console.error('Failed to load workbench data:', err)
+  }
 })
 </script>
 
 <style scoped>
-.page-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-.page-title { font-size: 20px; font-weight: 600; color: var(--text-primary); margin: 0 0 4px; }
-.page-subtitle { font-size: 13px; color: var(--text-secondary); margin: 0; }
-.block-card { margin-bottom: 16px; }
-.h-full { height: 100%; }
-.mt-16 { margin-top: 16px; }
-.card-head { display: flex; justify-content: space-between; align-items: center; }
+.workbench-view { max-width: 1400px; margin: 0 auto; }
+.stat-value-ellipsis { font-size: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.workbench-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 16px; }
+.panel-empty { min-height: 96px; }
 
-.state-steps { display: flex; gap: 12px; flex-wrap: wrap; }
-.state-step {
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 14px 18px; border-radius: 12px; cursor: pointer; background: #f7f8fa;
-  border: 1px solid transparent; transition: all .2s; min-width: 96px;
+/* 当前节点 */
+.state-hero {
+  display: flex; align-items: center; gap: 14px;
+  border: 2px solid; border-radius: var(--radius-lg); padding: 16px 18px; 
+  background: var(--surface); box-shadow: var(--shadow-sm);
+  transition: all var(--transition-base);
 }
-.state-step:hover { border-color: #4f8cff; transform: translateY(-2px); }
-.state-step.current { background: linear-gradient(135deg, rgba(79,140,255,.12), rgba(111,92,255,.12)); border-color: #4f8cff; }
-.state-step.disabled { opacity: .45; cursor: not-allowed; }
-.state-dot { width: 34px; height: 34px; border-radius: 50%; color: #fff; display: flex; align-items: center; justify-content: center; }
-.state-label { font-size: 13px; font-weight: 600; }
-.state-key { font-size: 11px; color: var(--text-placeholder); }
-
-.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-.stat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-.stat .num { font-size: 22px; font-weight: 700; color: var(--app-primary); }
-.stat .label { font-size: 12px; color: var(--text-secondary); }
-
-.json-pre {
-  background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 14px;
-  font-size: 12px; line-height: 1.6; max-height: 400px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+.state-hero:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
 }
-.tip { font-size: 13px; color: var(--text-secondary); margin: 0 0 12px; }
-.muted { color: var(--text-placeholder); }
-.doc-content { max-height: 70vh; overflow: auto; }
+.state-dot { 
+  width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; 
+  box-shadow: 0 0 0 4px rgba(79,70,229,.12);
+  transition: all var(--transition-base);
+}
+.state-hero-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.state-hero-label { font-size: 17px; font-weight: 700; color: var(--text-primary); }
+.state-hero-key { font-size: 12px; color: var(--text-secondary); }
+.state-switch { margin-top: 14px; }
+.state-switch-label { font-size: 12px; color: var(--text-secondary); font-weight: 600; display: block; margin-bottom: 8px; }
+.flow-step { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.flow-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.flow-label { font-size: 13px; color: var(--text-primary); }
+.flow-step.active .flow-label { font-weight: 700; }
+.flow-step.done:not(.active) .flow-label { color: var(--text-secondary); }
+
+/* 运行记录 */
+.logs-list { display: flex; flex-direction: column; gap: 8px; }
+.log-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; background: var(--accent-soft); 
+  border: 1px solid var(--accent-border); border-radius: var(--radius-md); 
+  font-size: 13px; transition: all var(--transition-base);
+}
+.log-item:hover {
+  background: var(--accent-border);
+  transform: translateX(4px);
+}
+.log-time { color: var(--text-secondary); min-width: 80px; font-size: 12px; }
+.log-node { font-weight: 600; color: var(--accent); }
+.log-action { color: var(--text-primary); }
+
+/* 完成度 */
+.completion-stats { display: flex; flex-direction: column; gap: 14px; }
+.completion-item { display: flex; flex-direction: column; gap: 6px; }
+.completion-row { display: flex; align-items: center; justify-content: space-between; }
+.completion-label { font-size: 13px; color: var(--text-primary); }
+.completion-pct { font-size: 12px; color: var(--text-secondary); }
+
+/* 快速入口 */
+.quick-links { display: flex; flex-direction: column; gap: 10px; }
+.quick-link {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--surface); cursor: pointer; transition: all var(--transition-base);
+}
+.quick-link:hover { 
+  border-color: var(--accent-border); 
+  box-shadow: var(--shadow-hover);
+  transform: translateY(-2px);
+}
+.quick-link-icon {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: #eef2ff; color: #6366f1; font-size: 18px;
+}
+.quick-link-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.quick-link-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+.quick-link-desc { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.quick-link-arrow { color: var(--text-placeholder); }
+
+/* 题材与人物状态维度 */
+.genre-desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+.dims-hint { font-size: 12px; color: var(--text-placeholder); margin-bottom: 10px; }
+.block-label { font-size: 12px; color: var(--text-secondary); font-weight: 600; margin-bottom: 8px; }
+.template-dims { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.dim-chip {
+  padding: 3px 10px; border-radius: 999px; font-size: 12px;
+  background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-border);
+}
+.dim-chip.dim-core { font-weight: 600; }
+.custom-dims { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.dim-row { display: flex; align-items: center; gap: 8px; }
+.dim-key { width: 130px; }
+.dim-label { width: 110px; }
+.dim-hint { flex: 1; }
+.dim-actions { display: flex; align-items: center; gap: 8px; }
 </style>
 
